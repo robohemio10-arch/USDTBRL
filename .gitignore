@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Linting / typing
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+data/logs/
+data/logs/*.jsonl
+
+# Dashboard cache
+data/dashboard_cache/
+
+# Databases (keep only canonical if needed)
+data/*.sqlite-journal
+data/*_old.sqlite
+data/bkp*.sqlite
+
+# Optional: ignore all DBs (uncomment if desired)
+# data/*.sqlite
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db

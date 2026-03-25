@@ -1,0 +1,8 @@
+runtime:
+  modular_runtime_enabled: false
+  scheduler_enabled: false
+  lifecycle_enabled: false
+dashboard:
+  modular_dashboard_enabled: false
+research:
+  shadow_mode_enabled: false

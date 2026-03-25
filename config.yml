@@ -1,0 +1,125 @@
+# DEPRECATED:
+# Este arquivo existe apenas por compatibilidade.
+# O caminho canônico de configuração é: config/config.yml
+# Novas mudanças devem ser feitas em config/config.yml.
+exchange:
+  id: binance
+  base_url: https://api.binance.com
+  api_key_env: BINANCE_API_KEY
+  api_secret_env: BINANCE_API_SECRET
+  timeout_seconds: 20
+  recv_window: 5000
+  request_retries: 3
+  request_backoff_seconds: 1.0
+storage:
+  db_path: data/usdtbrl_live.sqlite
+runtime:
+  loop_seconds: 5
+  deactivate_after_sell: false
+  startup_reconcile: true
+  reconcile_on_tick: true
+  inflight_order_lock_seconds: 120
+  circuit_breaker_max_errors: 5
+  circuit_breaker_cooldown_seconds: 300
+  reconcile_pause_on_mismatch: true
+  reconcile_qty_tolerance_usdt: 0.0001
+portfolio:
+  initial_cash_brl: 528.0
+market:
+  symbol: USDT/BRL
+  timeframe: 1m
+  lookback_bars: 240
+  research_lookback_bars: 800
+execution:
+  mode: live
+  entry_order_type: limit
+  exit_order_type: limit
+  fee_rate: 0.001
+  limit_orders_enabled: true
+  buy_price_offset_bps: 3
+  sell_price_offset_bps: 3
+  reprice_wait_seconds: 10
+  reprice_attempts: 6
+  entry_fallback_market: true
+  exit_fallback_market: false
+  force_sell_market: true
+  limit_time_in_force: GTC
+risk:
+  max_open_brl: 500.0
+  max_daily_loss_brl: 50.0
+strategy:
+  enabled: true
+  first_buy_brl: 60.0
+  max_cycle_brl: 500.0
+  take_profit_pct: 1.0
+  trailing_enabled: true
+  trailing_activation_pct: 0.45
+  trailing_callback_pct: 0.18
+  return_rebuy_pct: 0.12
+  stop_loss_enabled: true
+  stop_loss_pct: 8.0
+  stop_loss_market: true
+  min_profit_brl: 0.15
+  ramps:
+  - drop_pct: 0.35
+    multiplier: 1.0
+  - drop_pct: 0.7
+    multiplier: 1.25
+  - drop_pct: 1.05
+    multiplier: 1.5
+  - drop_pct: 1.4
+    multiplier: 2.0
+  - drop_pct: 1.8
+    multiplier: 2.5
+  - drop_pct: 2.2
+    multiplier: 3.0
+  - drop_pct: 2.7
+    multiplier: 4.0
+  - drop_pct: 3.3
+    multiplier: 5.0
+  - drop_pct: 4.0
+    multiplier: 6.0
+  - drop_pct: 4.8
+    multiplier: 8.0
+  - drop_pct: 5.7
+    multiplier: 10.0
+  - drop_pct: 6.8
+    multiplier: 12.0
+  - drop_pct: 8.0
+    multiplier: 15.0
+  - drop_pct: 9.4
+    multiplier: 18.0
+research:
+  monte_carlo_runs: 300
+  block_bootstrap_block_size: 24
+  walk_forward_folds: 3
+  walk_forward_train_ratio: 0.65
+simulation:
+  mock_price_brl: 5.2
+notifications:
+  ntfy:
+    enabled: true
+    topic_env: NTFY_TOPIC
+    server_env: NTFY_SERVER
+    token_env: NTFY_TOKEN
+    username_env: NTFY_USERNAME
+    password_env: NTFY_PASSWORD
+    sales_enabled: true
+    daily_report_enabled: true
+    notify_live: true
+    notify_paper: false
+    daily_report_hour: 20
+    daily_report_minute: 30
+    utc_offset: -03:00
+    timeout_seconds: 10
+    default_tags:
+    - moneybag
+    - chart_with_upwards_trend
+dashboard:
+  cache_dir: data/dashboard_cache
+logging:
+  dir: data/logs
+  console: true
+health:
+  stale_runtime_minutes: 20
+  stale_market_cache_minutes: 240
