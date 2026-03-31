@@ -45,3 +45,11 @@ data/bkp*.sqlite
 # OS files
 .DS_Store
 Thumbs.db
+.env
+USDTBRL.zip
+.mypy_cache/
+_memory_/
+__pycache__/
+*.sqlite
+*.db
+*.log
