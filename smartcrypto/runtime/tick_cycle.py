@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from smartcrypto.domain.risk import min_profit_brl, min_profit_exit_price
+from smartcrypto.domain.strategy import can_execute_sell_reason as domain_can_execute_sell_reason
 from smartcrypto.execution.controls import (
     build_safety_ladder,
     is_live_mode,
@@ -12,12 +14,22 @@ from smartcrypto.execution.controls import (
     set_reentry_block,
 )
 from smartcrypto.infra.binance_adapter import ExchangeAdapter
+from smartcrypto.runtime.ai_runtime import evaluate_runtime_ai
 from smartcrypto.state.store import StateStore
 
 
 def _legacy() -> Any:
     from smartcrypto.runtime import bot_runtime as legacy
+
     return legacy
+
+
+def _set_baseline_decision(store: StateStore, decision: dict[str, Any]) -> None:
+    payload = dict(decision or {})
+    payload.setdefault("source", "runtime_tick")
+    payload.setdefault("enabled", True)
+    payload.setdefault("is_real", True)
+    store.set_flag("ai_runtime_baseline_decision", payload)
 
 
 def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> dict[str, Any]:
@@ -42,8 +54,20 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             store.add_event(str(notice["level"]), str(notice["code"]), dict(notice["payload"]))
             store.set_flag(flag_key, True)
     position = store.update_position(regime=regime)
+    ai_runtime = evaluate_runtime_ai(cfg, store, ohlcv)
+    baseline_decision: dict[str, Any] = {
+        "source": "runtime_tick",
+        "enabled": True,
+        "is_real": True,
+        "position_status": str(position.status),
+        "entry_gate": bool(position.status == "flat"),
+        "position_action": "wait",
+        "reason": "no_signal",
+    }
 
     if legacy.active_dispatch_lock_present(cfg, store):
+        baseline_decision.update({"entry_gate": False, "reason": "dispatch_lock_active"})
+        _set_baseline_decision(store, baseline_decision)
         ladder = (
             build_safety_ladder(
                 position.avg_price_brl or last_price,
@@ -70,6 +94,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
         return legacy.status_payload(store, last_price, cfg)
 
     if bool(store.get_flag("live_reconcile_required", False)):
+        baseline_decision.update({"entry_gate": False, "reason": "reconcile_required"})
+        _set_baseline_decision(store, baseline_decision)
         ladder = (
             build_safety_ladder(
                 position.avg_price_brl or last_price,
@@ -96,6 +122,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
         return legacy.status_payload(store, last_price, cfg)
 
     if bool(store.get_flag("reset_cycle_requested", False)):
+        baseline_decision.update({"entry_gate": False, "reason": "reset_cycle_requested"})
         if is_live_mode(cfg) and position.status == "open":
             store.set_flag("reset_cycle_requested", False)
             store.add_event(
@@ -103,6 +130,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                 "reset_blocked_live_open_position",
                 {"reason": "position_open_on_exchange_must_be_closed_first"},
             )
+            _set_baseline_decision(store, baseline_decision)
             legacy.log_snapshot(
                 store,
                 price=last_price,
@@ -120,6 +148,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             set_reentry_block(store, reset_cooldown, "reset")
         store.add_event("WARN", "cycle_reset_from_dashboard", {})
         position = store.get_position()
+        _set_baseline_decision(store, baseline_decision)
         legacy.log_snapshot(
             store,
             price=last_price,
@@ -132,6 +161,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
         return legacy.status_payload(store, last_price, cfg)
 
     if bool(store.get_flag("paused", False)) or not params["enabled"]:
+        baseline_decision.update({"entry_gate": False, "reason": "paused_or_disabled"})
+        _set_baseline_decision(store, baseline_decision)
         ladder = (
             build_safety_ladder(
                 position.avg_price_brl or last_price,
@@ -161,6 +192,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
     current_unrealized_loss = min(0.0, float(position.qty_usdt * last_price - position.brl_spent))
     todays_total_loss = legacy.todays_realized_loss_brl(store) + current_unrealized_loss
     if daily_loss_limit > 0 and todays_total_loss <= -abs(daily_loss_limit):
+        baseline_decision.update({"entry_gate": False, "reason": "daily_loss_limit_hit"})
+        _set_baseline_decision(store, baseline_decision)
         store.set_flag("paused", True)
         store.add_event(
             "WARN",
@@ -176,6 +209,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
         return legacy.status_payload(store, last_price, cfg)
 
     if bool(store.get_flag("force_sell_requested", False)) and position.status == "open":
+        baseline_decision.update({"entry_gate": False, "position_action": "reduce", "reason": "force_sell"})
         position = legacy.execute_sell(
             store=store,
             position=position,
@@ -193,6 +227,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
     if position.status == "flat":
         remaining_reentry_block = reentry_remaining_seconds(store)
         if remaining_reentry_block > 0:
+            baseline_decision.update({"entry_gate": False, "reason": "reentry_blocked"})
+            _set_baseline_decision(store, baseline_decision)
             replace_dashboard_orders(store, position, [], cfg, params, allow_new_entries=False)
             legacy.log_snapshot(
                 store,
@@ -206,6 +242,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             return legacy.status_payload(store, last_price, cfg)
         price_reentry_threshold = reentry_price_threshold(store)
         if price_reentry_threshold > 0 and last_price > price_reentry_threshold:
+            baseline_decision.update({"entry_gate": False, "reason": "reentry_price_blocked"})
+            _set_baseline_decision(store, baseline_decision)
             replace_dashboard_orders(store, position, [], cfg, params, allow_new_entries=False)
             legacy.log_snapshot(
                 store,
@@ -227,6 +265,27 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             float(params["first_buy_brl"]), current_cash, max_open, float(params["max_cycle_brl"])
         )
         if order_brl > 0:
+            baseline_decision.update(
+                {
+                    "entry_gate": True,
+                    "position_action": "enter",
+                    "reason": "initial_entry",
+                    "order_brl": float(order_brl),
+                }
+            )
+            if not bool(ai_runtime.get("effective_entry_gate", True)):
+                _set_baseline_decision(store, baseline_decision)
+                store.add_event("INFO", "ai_entry_blocked", {"stage": ai_runtime.get("stage", "unknown"), "reason": ai_runtime.get("reason", "")})
+                legacy.log_snapshot(
+                    store,
+                    price=last_price,
+                    position=position,
+                    cfg=cfg,
+                    regime=regime,
+                    meta={"action": "ai_entry_blocked", "ai": ai_runtime},
+                )
+                legacy.send_daily_report_if_due(store=store, cfg=cfg, position=position, last_price=last_price)
+                return legacy.status_payload(store, last_price, cfg)
             position = legacy.execute_buy(
                 store=store,
                 position=position,
@@ -247,7 +306,8 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             if row["status"] == "ready":
                 next_row = row
                 break
-        if next_row and last_price <= float(next_row["trigger_price_brl"]):
+        allow_safety = str(ai_runtime.get("position_action", "wait")) not in {"reduce", "risk_off"}
+        if next_row and allow_safety and last_price <= float(next_row["trigger_price_brl"]):
             initial_cash = float(cfg["portfolio"]["initial_cash_brl"])
             current_cash = legacy.cash_available(initial_cash, position)
             remaining_budget = max(0.0, float(params["max_cycle_brl"]) - position.brl_spent)
@@ -260,6 +320,14 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                 float(next_row["order_brl"]), current_cash, remaining_budget, remaining_open
             )
             if order_brl > 0:
+                baseline_decision.update(
+                    {
+                        "entry_gate": True,
+                        "position_action": "add",
+                        "reason": f"safety_{int(next_row['step_index'])}",
+                        "order_brl": float(order_brl),
+                    }
+                )
                 position = legacy.execute_buy(
                     store=store,
                     position=position,
@@ -273,6 +341,27 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                 )
 
         position = store.get_position()
+        if position.status == "open":
+            ai_position_action = str(ai_runtime.get("position_action", "wait"))
+            if ai_position_action in {"risk_off", "take_profit"} and domain_can_execute_sell_reason(
+                position=position,
+                price_brl=legacy.offset_price(last_price, "sell", cfg),
+                reason=f"ai_{ai_position_action}",
+                cfg=cfg,
+            ):
+                baseline_decision.update({"entry_gate": False, "position_action": "hold", "reason": "ai_override_sell"})
+                position = legacy.execute_sell(
+                    store=store,
+                    position=position,
+                    exchange=exchange,
+                    price_brl=legacy.offset_price(last_price, "sell", cfg),
+                    reason=f"ai_{ai_position_action}",
+                    regime=regime,
+                    cfg=cfg,
+                    params=params,
+                )
+                store.add_event("INFO", "ai_position_action", {"action": ai_position_action})
+            position = store.get_position()
         if position.status == "open":
             trailing_active = int(position.trailing_active)
             anchor = float(position.trailing_anchor_brl)
@@ -293,12 +382,13 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                 if trailing_active:
                     anchor = max(anchor, last_price)
                     trailing_trigger_price = anchor * (1.0 - float(params["trailing_callback"]))
-                    if last_price <= trailing_trigger_price and can_execute_sell_reason(
+                    if last_price <= trailing_trigger_price and domain_can_execute_sell_reason(
                         position=position,
                         price_brl=legacy.offset_price(last_price, "sell", cfg),
                         reason="trailing_exit",
                         cfg=cfg,
                     ):
+                        baseline_decision.update({"entry_gate": False, "position_action": "reduce", "reason": "trailing_exit"})
                         position = legacy.execute_sell(
                             store=store,
                             position=position,
@@ -312,6 +402,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
             position = store.get_position()
             if position.status == "open":
                 if bool(params["stop_loss_enabled"]) and last_price <= position.stop_price_brl:
+                    baseline_decision.update({"entry_gate": False, "position_action": "risk_off", "reason": "stop_loss"})
                     position = legacy.execute_sell(
                         store=store,
                         position=position,
@@ -325,13 +416,14 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                 elif (
                     last_price >= position.tp_price_brl
                     and not trailing_active
-                    and can_execute_sell_reason(
+                    and domain_can_execute_sell_reason(
                         position=position,
                         price_brl=legacy.offset_price(last_price, "sell", cfg),
                         reason="take_profit",
                         cfg=cfg,
                     )
                 ):
+                    baseline_decision.update({"entry_gate": False, "position_action": "take_profit", "reason": "take_profit"})
                     position = legacy.execute_sell(
                         store=store,
                         position=position,
@@ -351,6 +443,7 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
                         regime=regime,
                     )
 
+    _set_baseline_decision(store, baseline_decision)
     position = store.get_position()
     ladder = (
         build_safety_ladder(
@@ -364,6 +457,3 @@ def tick(cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter) -> d
     legacy.log_snapshot(store, price=last_price, position=position, cfg=cfg, regime=regime)
     legacy.send_daily_report_if_due(store=store, cfg=cfg, position=position, last_price=last_price)
     return legacy.status_payload(store, last_price, cfg)
-
-
-

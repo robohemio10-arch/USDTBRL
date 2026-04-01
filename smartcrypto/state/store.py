@@ -82,6 +82,9 @@ class StateStore:
     def conn(self):
         return self.database.connect()
 
+    def transaction(self):
+        return self.database.transaction()
+
     def _init_db(self) -> None:
         with self.conn() as c:
             apply_migrations(c)
@@ -324,24 +327,7 @@ class StateStore:
     def get_position(self) -> PositionState:
         with self.conn() as c:
             row = c.execute("select * from positions order by id desc limit 1").fetchone()
-        if row is None:
-            return PositionState(updated_at=utc_now())
-        data = dict(row)
-        return PositionState(
-            status=data.get("status", "flat"),
-            qty_usdt=float(data.get("qty_usdt", 0.0) or 0.0),
-            brl_spent=float(data.get("brl_spent", 0.0) or 0.0),
-            avg_price_brl=float(data.get("avg_price_brl", 0.0) or 0.0),
-            realized_pnl_brl=float(data.get("realized_pnl_brl", 0.0) or 0.0),
-            unrealized_pnl_brl=float(data.get("unrealized_pnl_brl", 0.0) or 0.0),
-            tp_price_brl=float(data.get("tp_price_brl", 0.0) or 0.0),
-            stop_price_brl=float(data.get("stop_price_brl", 0.0) or 0.0),
-            safety_count=int(data.get("safety_count", 0) or 0),
-            regime=data.get("regime", "sideways"),
-            trailing_active=int(data.get("trailing_active", 0) or 0),
-            trailing_anchor_brl=float(data.get("trailing_anchor_brl", 0.0) or 0.0),
-            updated_at=data.get("updated_at", ""),
-        )
+        return self._position_from_row(row)
 
 
     def update_position(self, **updates: Any) -> PositionState:
@@ -364,8 +350,7 @@ class StateStore:
             updated_at=utc_now(),
         )
         with self.conn() as c:
-            c.execute("delete from positions")
-            self._insert_position(c, payload)
+            self._update_position_with_conn(c, payload)
         return payload
 
 
@@ -388,6 +373,477 @@ class StateStore:
             ),
         )
 
+
+
+    def _position_from_row(self, row: sqlite3.Row | dict[str, Any] | None) -> PositionState:
+        if row is None:
+            return PositionState(updated_at=utc_now())
+        data = dict(row)
+        return PositionState(
+            status=data.get("status", "flat"),
+            qty_usdt=float(data.get("qty_usdt", 0.0) or 0.0),
+            brl_spent=float(data.get("brl_spent", 0.0) or 0.0),
+            avg_price_brl=float(data.get("avg_price_brl", 0.0) or 0.0),
+            realized_pnl_brl=float(data.get("realized_pnl_brl", 0.0) or 0.0),
+            unrealized_pnl_brl=float(data.get("unrealized_pnl_brl", 0.0) or 0.0),
+            tp_price_brl=float(data.get("tp_price_brl", 0.0) or 0.0),
+            stop_price_brl=float(data.get("stop_price_brl", 0.0) or 0.0),
+            safety_count=int(data.get("safety_count", 0) or 0),
+            regime=data.get("regime", "sideways"),
+            trailing_active=int(data.get("trailing_active", 0) or 0),
+            trailing_anchor_brl=float(data.get("trailing_anchor_brl", 0.0) or 0.0),
+            updated_at=data.get("updated_at", ""),
+        )
+
+    def _get_position_with_conn(self, conn: sqlite3.Connection) -> PositionState:
+        row = conn.execute("select * from positions order by id desc limit 1").fetchone()
+        return self._position_from_row(row)
+
+    def _update_position_with_conn(
+        self, conn: sqlite3.Connection, payload: PositionState
+    ) -> PositionState:
+        conn.execute("delete from positions")
+        self._insert_position(conn, payload)
+        return payload
+
+    def _set_flag_with_conn(self, conn: sqlite3.Connection, key: str, value: Any) -> None:
+        conn.execute(
+            """
+            insert into bot_state(key, value)
+            values(?, ?)
+            on conflict(key) do update set value=excluded.value
+            """,
+            (key, json.dumps(value)),
+        )
+
+    def _add_trade_with_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        side: str,
+        price_brl: float,
+        qty_usdt: float,
+        brl_value: float,
+        fee_brl: float,
+        reason: str,
+        mode: str,
+        regime: str,
+        bot_order_id: str | None = None,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        run_id: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        conn.execute(
+            """
+            insert into trades(
+                created_at, side, price_brl, qty_usdt, brl_value, fee_brl, reason, mode, regime,
+                bot_order_id, client_order_id, exchange_order_id, run_id, source
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                side,
+                price_brl,
+                qty_usdt,
+                brl_value,
+                fee_brl,
+                reason,
+                mode,
+                regime,
+                bot_order_id,
+                client_order_id,
+                exchange_order_id,
+                run_id,
+                source,
+            ),
+        )
+
+    def _open_cycle_with_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        regime: str,
+        entry_price_brl: float,
+        qty_usdt: float,
+        brl_spent: float,
+    ) -> None:
+        conn.execute(
+            """
+            insert into cycles(
+                opened_at, closed_at, regime, entry_price_brl, exit_price_brl, qty_usdt,
+                brl_spent, brl_received, pnl_brl, pnl_pct, safety_count, exit_reason, status
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                None,
+                regime,
+                entry_price_brl,
+                None,
+                qty_usdt,
+                brl_spent,
+                None,
+                None,
+                None,
+                0,
+                None,
+                "open",
+            ),
+        )
+
+    def _sync_open_cycle_with_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        qty_usdt: float,
+        brl_spent: float,
+        safety_count: int,
+    ) -> None:
+        row = conn.execute(
+            "select id from cycles where status='open' order by id desc limit 1"
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            "update cycles set qty_usdt=?, brl_spent=?, safety_count=? where id=?",
+            (qty_usdt, brl_spent, safety_count, row["id"]),
+        )
+
+    def _close_latest_cycle_with_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        exit_price_brl: float,
+        brl_received: float,
+        pnl_brl: float,
+        pnl_pct: float,
+        safety_count: int,
+        exit_reason: str,
+    ) -> None:
+        row = conn.execute(
+            "select id from cycles where status='open' order by id desc limit 1"
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """
+            update cycles
+            set closed_at=?, exit_price_brl=?, brl_received=?, pnl_brl=?, pnl_pct=?,
+                safety_count=?, exit_reason=?, status='closed'
+            where id=?
+            """,
+            (
+                utc_now(),
+                exit_price_brl,
+                brl_received,
+                pnl_brl,
+                pnl_pct,
+                safety_count,
+                exit_reason,
+                row["id"],
+            ),
+        )
+
+    def _add_bot_event_with_conn(
+        self, conn: sqlite3.Connection, level: str, event: str, details: dict[str, Any] | None = None
+    ) -> None:
+        conn.execute(
+            "insert into bot_events(ts, level, event, details_json) values (?, ?, ?, ?)",
+            (utc_now(), level, event, json.dumps(details or {}, ensure_ascii=False)),
+        )
+
+    def _update_dispatch_lock_with_conn(
+        self, conn: sqlite3.Connection, bot_order_id: str, *, terminal_status: str = "terminal"
+    ) -> None:
+        conn.execute(
+            "update order_dispatch_locks set status = ?, updated_at = ? where bot_order_id = ?",
+            (terminal_status, utc_now(), bot_order_id),
+        )
+
+    def trade_exists(self, bot_order_id: str) -> bool:
+        with self.conn() as c:
+            row = c.execute(
+                "select 1 from trades where bot_order_id = ? limit 1",
+                (bot_order_id,),
+            ).fetchone()
+        return row is not None
+
+    def read_operational_identity(self) -> dict[str, str]:
+        keys = ("db_role", "db_profile_id", "db_symbol")
+        payload: dict[str, str] = {}
+        with self.conn() as c:
+            rows = c.execute(
+                f"select key, value from bot_state where key in ({', '.join('?' for _ in keys)})",
+                keys,
+            ).fetchall()
+        for row in rows:
+            try:
+                payload[str(row["key"])] = str(json.loads(row["value"]) or "")
+            except Exception:
+                payload[str(row["key"])] = str(row["value"] or "")
+        return payload
+
+    def ensure_operational_identity(
+        self,
+        *,
+        db_role: str,
+        profile_id: str,
+        symbol: str,
+        fail_on_mismatch: bool = True,
+    ) -> None:
+        expected = {
+            "db_role": str(db_role or "").strip().lower(),
+            "db_profile_id": str(profile_id or "").strip(),
+            "db_symbol": str(symbol or "").strip().upper(),
+        }
+        current = self.read_operational_identity()
+        mismatches = [
+            key
+            for key, value in expected.items()
+            if current.get(key) and str(current.get(key)) != value
+        ]
+        if mismatches and fail_on_mismatch:
+            detail = ", ".join(f"{key}={current.get(key)} != {expected[key]}" for key in mismatches)
+            raise ValueError(f"Identidade operacional do banco divergente: {detail}")
+        with self.transaction() as conn:
+            for key, value in expected.items():
+                self._set_flag_with_conn(conn, key, value)
+
+    def apply_buy_fill(
+        self,
+        *,
+        bot_order_id: str,
+        reason: str,
+        regime: str,
+        mode: str,
+        fee_rate: float,
+        exec_price_brl: float,
+        exec_qty_usdt: float,
+        exec_quote_brl: float,
+        tp_price_brl: float,
+        stop_price_brl: float,
+        order_type: str,
+        source: str,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        run_id: str | None = None,
+        terminal_lock_status: str = "terminal",
+    ) -> PositionState:
+        if self.trade_exists(bot_order_id):
+            return self.get_position()
+        with self.transaction() as conn:
+            current = self._get_position_with_conn(conn)
+            fee_brl = float(exec_quote_brl) * float(fee_rate)
+            total_cost = float(exec_quote_brl) + fee_brl
+            new_qty = float(current.qty_usdt) + float(exec_qty_usdt)
+            new_spent = float(current.brl_spent) + total_cost
+            avg_price_brl = new_spent / max(new_qty, 1e-9)
+            safety_count = int(current.safety_count) + (1 if current.status == "open" else 0)
+
+            self._add_trade_with_conn(
+                conn,
+                side="buy",
+                price_brl=float(exec_price_brl),
+                qty_usdt=float(exec_qty_usdt),
+                brl_value=float(exec_quote_brl),
+                fee_brl=fee_brl,
+                reason=reason,
+                mode=mode,
+                regime=regime,
+                bot_order_id=bot_order_id,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                run_id=run_id,
+                source=source,
+            )
+            if current.status == "flat":
+                self._open_cycle_with_conn(
+                    conn,
+                    regime=regime,
+                    entry_price_brl=float(exec_price_brl),
+                    qty_usdt=new_qty,
+                    brl_spent=new_spent,
+                )
+            else:
+                self._sync_open_cycle_with_conn(
+                    conn,
+                    qty_usdt=new_qty,
+                    brl_spent=new_spent,
+                    safety_count=safety_count,
+                )
+            payload = PositionState(
+                status="open",
+                qty_usdt=new_qty,
+                brl_spent=new_spent,
+                avg_price_brl=avg_price_brl,
+                realized_pnl_brl=float(current.realized_pnl_brl),
+                unrealized_pnl_brl=(new_qty * float(exec_price_brl)) - new_spent,
+                tp_price_brl=float(tp_price_brl),
+                stop_price_brl=float(stop_price_brl),
+                safety_count=safety_count,
+                regime=regime,
+                trailing_active=0,
+                trailing_anchor_brl=0.0,
+                updated_at=utc_now(),
+            )
+            self._update_position_with_conn(conn, payload)
+            self._set_flag_with_conn(conn, "reentry_price_below", 0)
+            self._add_bot_event_with_conn(
+                conn,
+                "INFO",
+                "buy_executed",
+                {
+                    "reason": reason,
+                    "price_brl": float(exec_price_brl),
+                    "brl_value": float(exec_quote_brl),
+                    "qty_usdt": float(exec_qty_usdt),
+                    "order_type": order_type,
+                    "bot_order_id": bot_order_id,
+                    "source": source,
+                },
+            )
+            self._update_dispatch_lock_with_conn(conn, bot_order_id, terminal_status=terminal_lock_status)
+            return payload
+
+    def apply_sell_fill(
+        self,
+        *,
+        bot_order_id: str,
+        reason: str,
+        regime: str,
+        mode: str,
+        fee_rate: float,
+        exec_price_brl: float,
+        exec_qty_usdt: float,
+        exec_quote_brl: float,
+        qty_tolerance_usdt: float,
+        tp_price_brl: float | None,
+        stop_price_brl: float | None,
+        order_type: str,
+        source: str,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        run_id: str | None = None,
+        terminal_lock_status: str = "terminal",
+        keep_trailing_state: bool = True,
+    ) -> PositionState:
+        if self.trade_exists(bot_order_id):
+            return self.get_position()
+        with self.transaction() as conn:
+            current = self._get_position_with_conn(conn)
+            fee_brl = float(exec_quote_brl) * float(fee_rate)
+            net_received = float(exec_quote_brl) - fee_brl
+            target_qty = float(current.qty_usdt)
+            fill_ratio = min(1.0, float(exec_qty_usdt) / max(target_qty, 1e-9))
+            sold_cost_basis = float(current.brl_spent) * fill_ratio
+            pnl_brl = net_received - sold_cost_basis
+            pnl_pct = (pnl_brl / sold_cost_basis) * 100.0 if sold_cost_basis else 0.0
+            realized_pnl_brl = float(current.realized_pnl_brl) + pnl_brl
+            remaining_qty = max(0.0, target_qty - float(exec_qty_usdt))
+            remaining_spent = max(0.0, float(current.brl_spent) - sold_cost_basis)
+
+            self._add_trade_with_conn(
+                conn,
+                side="sell",
+                price_brl=float(exec_price_brl),
+                qty_usdt=float(exec_qty_usdt),
+                brl_value=float(exec_quote_brl),
+                fee_brl=fee_brl,
+                reason=reason,
+                mode=mode,
+                regime=regime,
+                bot_order_id=bot_order_id,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                run_id=run_id,
+                source=source,
+            )
+
+            if remaining_qty <= float(qty_tolerance_usdt):
+                self._close_latest_cycle_with_conn(
+                    conn,
+                    exit_price_brl=float(exec_price_brl),
+                    brl_received=net_received,
+                    pnl_brl=pnl_brl,
+                    pnl_pct=pnl_pct,
+                    safety_count=int(current.safety_count),
+                    exit_reason=reason,
+                )
+                payload = PositionState(
+                    status="flat",
+                    qty_usdt=0.0,
+                    brl_spent=0.0,
+                    avg_price_brl=0.0,
+                    realized_pnl_brl=realized_pnl_brl,
+                    unrealized_pnl_brl=0.0,
+                    tp_price_brl=0.0,
+                    stop_price_brl=0.0,
+                    safety_count=0,
+                    regime=regime,
+                    trailing_active=0,
+                    trailing_anchor_brl=0.0,
+                    updated_at=utc_now(),
+                )
+                self._update_position_with_conn(conn, payload)
+                self._add_bot_event_with_conn(
+                    conn,
+                    "INFO",
+                    "sell_executed",
+                    {
+                        "reason": reason,
+                        "price_brl": float(exec_price_brl),
+                        "pnl_brl": pnl_brl,
+                        "qty_usdt": float(exec_qty_usdt),
+                        "order_type": order_type,
+                        "bot_order_id": bot_order_id,
+                        "source": source,
+                    },
+                )
+                self._update_dispatch_lock_with_conn(conn, bot_order_id, terminal_status=terminal_lock_status)
+                return payload
+
+            remaining_avg = remaining_spent / max(remaining_qty, 1e-9)
+            self._sync_open_cycle_with_conn(
+                conn,
+                qty_usdt=remaining_qty,
+                brl_spent=remaining_spent,
+                safety_count=int(current.safety_count),
+            )
+            payload = PositionState(
+                status="open",
+                qty_usdt=remaining_qty,
+                brl_spent=remaining_spent,
+                avg_price_brl=remaining_avg,
+                realized_pnl_brl=realized_pnl_brl,
+                unrealized_pnl_brl=(remaining_qty * float(exec_price_brl)) - remaining_spent,
+                tp_price_brl=float(tp_price_brl or 0.0),
+                stop_price_brl=float(stop_price_brl or 0.0),
+                safety_count=int(current.safety_count),
+                regime=regime,
+                trailing_active=int(current.trailing_active if keep_trailing_state else 0),
+                trailing_anchor_brl=float(current.trailing_anchor_brl if keep_trailing_state else 0.0),
+                updated_at=utc_now(),
+            )
+            self._update_position_with_conn(conn, payload)
+            self._add_bot_event_with_conn(
+                conn,
+                "WARN",
+                "sell_partially_executed",
+                {
+                    "reason": reason,
+                    "price_brl": float(exec_price_brl),
+                    "qty_executed_usdt": float(exec_qty_usdt),
+                    "qty_remaining_usdt": remaining_qty,
+                    "pnl_brl": pnl_brl,
+                    "order_type": order_type,
+                    "bot_order_id": bot_order_id,
+                    "source": source,
+                },
+            )
+            self._update_dispatch_lock_with_conn(conn, bot_order_id, terminal_status=terminal_lock_status)
+            return payload
 
     def replace_safety_ladder(self, ladder_rows: list[dict[str, Any]]) -> None:
         with self.conn() as c:
@@ -419,14 +875,37 @@ class StateStore:
         reason: str,
         mode: str,
         regime: str,
+        bot_order_id: str | None = None,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        run_id: str | None = None,
+        source: str | None = None,
     ) -> None:
         with self.conn() as c:
             c.execute(
                 """
-                insert into trades(created_at, side, price_brl, qty_usdt, brl_value, fee_brl, reason, mode, regime)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                insert into trades(
+                    created_at, side, price_brl, qty_usdt, brl_value, fee_brl, reason, mode, regime,
+                    bot_order_id, client_order_id, exchange_order_id, run_id, source
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (utc_now(), side, price_brl, qty_usdt, brl_value, fee_brl, reason, mode, regime),
+                (
+                    utc_now(),
+                    side,
+                    price_brl,
+                    qty_usdt,
+                    brl_value,
+                    fee_brl,
+                    reason,
+                    mode,
+                    regime,
+                    bot_order_id,
+                    client_order_id,
+                    exchange_order_id,
+                    run_id,
+                    source,
+                ),
             )
 
 
@@ -544,6 +1023,7 @@ class StateStore:
             "bot_state",
             "reconciliation_audit",
             "order_dispatch_locks",
+            "runtime_manifest",
         }
         if table not in allowed:
             raise ValueError(f"Tabela não permitida: {table}")

@@ -1,55 +1,85 @@
-# Python
+# =========================
+# Python bytecode / cache
+# =========================
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-*.so
+*$py.class
 
-# Virtual environments
+# =========================
+# Virtualenvs
+# =========================
 .venv/
 venv/
 env/
+ENV/
 
-# Packaging
-*.egg-info/
-dist/
-build/
-
-# Testing
-.pytest_cache/
-.coverage
-
-# Linting / typing
+# =========================
+# Tool caches
+# =========================
 .mypy_cache/
+.pytest_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.cache/
 
-# Logs
-*.log
-data/logs/
-data/logs/*.jsonl
+# =========================
+# Build / packaging
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
-# Dashboard cache
-data/dashboard_cache/
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Databases (keep only canonical if needed)
-data/*.sqlite-journal
-data/*_old.sqlite
-data/bkp*.sqlite
-
-# Optional: ignore all DBs (uncomment if desired)
-# data/*.sqlite
-
-# Environment variables
-.env
-
+# =========================
 # OS files
+# =========================
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# =========================
+# Secrets / local config
+# =========================
 .env
-USDTBRL.zip
-.mypy_cache/
+.env.*
+!.env.example
+*.pem
+*.key
+
+# =========================
+# Trading runtime artifacts
+# =========================
 _memory_/
-__pycache__/
+data/logs/
+data/runtime/
+data/exports/
+data/dashboard_cache/
+
+# Databases and local state
 *.sqlite
+*.sqlite3
 *.db
-*.log
+state.sqlite
+state_backup.sqlite
+state.paper_30d.squlite
+
+# Archives / dumps
+*.zip
+*.tar
+*.gz
+*.bak
+*.patch
+
+# Local notes (if desired)
+# *_NOTES.md

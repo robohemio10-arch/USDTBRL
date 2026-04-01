@@ -13,13 +13,33 @@ class SQLiteDatabase:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _build_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        return conn
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn = self._build_connection()
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        conn = self._build_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

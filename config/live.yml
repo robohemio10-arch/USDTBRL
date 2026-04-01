@@ -1,7 +1,3 @@
-# DEPRECATED:
-# Este arquivo existe apenas por compatibilidade.
-# O caminho canônico de configuração é: config/config.yml
-# Novas mudanças devem ser feitas em config/config.yml.
 exchange:
   id: binance
   base_url: https://api.binance.com
@@ -23,6 +19,8 @@ runtime:
   circuit_breaker_cooldown_seconds: 300
   reconcile_pause_on_mismatch: true
   reconcile_qty_tolerance_usdt: 0.0001
+  environment: live
+  reconcile_allow_extra_base_asset_balance: false
 portfolio:
   initial_cash_brl: 528.0
 market:
@@ -44,6 +42,7 @@ execution:
   exit_fallback_market: false
   force_sell_market: true
   limit_time_in_force: GTC
+  allow_live: true
 risk:
   max_open_brl: 500.0
   max_daily_loss_brl: 50.0

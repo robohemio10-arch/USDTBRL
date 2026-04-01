@@ -66,7 +66,7 @@ def render(cfg: dict[str, Any], status: dict[str, Any], ui: Any) -> None:
     position = status.get("position", {}) or {}
     figure = ui.build_market_figure(
         df=df,
-        trades=executions,
+        trades=visible_executions,
         position=position,
         title=f"USDT/BRL • {interval_label}",
         show_tp_stop=True,
@@ -77,9 +77,12 @@ def render(cfg: dict[str, Any], status: dict[str, Any], ui: Any) -> None:
     candlestick.render(figure)
 
     if visible_executions.empty:
-        st.info("Nenhuma compra ou venda executada caiu dentro da janela visível do gráfico.")
+        if executions.empty:
+            st.info("Ainda não há compras ou vendas executadas para marcar no gráfico.")
+        else:
+            st.info("Há negociações registradas, mas nenhuma caiu dentro da janela visível atual do gráfico.")
     else:
-        st.caption(f"Execuções visíveis no gráfico: {len(visible_executions)}")
+        st.caption(f"Pins visíveis no gráfico: {len(visible_executions)}")
 
     lower_left, lower_right = st.columns([1.0, 1.0])
     with lower_left:

@@ -10,6 +10,7 @@ def test_page_options_include_expected_pages() -> None:
         "NTFY",
         "Proteção",
         "DB",
+        "IA & Rollout",
     ]
 
 

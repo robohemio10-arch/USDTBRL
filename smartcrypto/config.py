@@ -21,7 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "request_retries": 3,
         "request_backoff_seconds": 1.0,
     },
-    "storage": {"db_path": "data/usdtbrl_live.sqlite"},
+    "storage": {"db_path": "data/usdtbrl_paper.sqlite"},
     "runtime": {
         "loop_seconds": 5,
         "deactivate_after_sell": False,
@@ -32,6 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "circuit_breaker_cooldown_seconds": 300,
         "reconcile_pause_on_mismatch": True,
         "reconcile_qty_tolerance_usdt": 0.0001,
+        "reconcile_allow_extra_base_asset_balance": False,
     },
     "portfolio": {"initial_cash_brl": 10000.0},
     "market": {

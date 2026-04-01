@@ -1,26 +1,55 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pandas as pd
-import requests
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from plotly.subplots import make_subplots
 
-from smartcrypto.common.constants import DEFAULT_CONFIG_PATH
 from smartcrypto.app import session as app_session
 from smartcrypto.app import styles as app_styles
 from smartcrypto.app.components import position_card, refresh_control
+from smartcrypto.app.config_io import (
+    config_consistency_status,
+    config_path,
+    load_cfg,
+    root_dir,
+    save_cfg,
+)
+from smartcrypto.app.data_access import (
+    bot_events_df,
+    cycles_df,
+    db_path_from_cfg,
+    dispatch_locks_df,
+    list_tables,
+    load_open_orders_cache,
+    load_runtime_status as load_runtime_status_fallback,
+    order_states_df,
+    parse_datetime_series,
+    planned_orders_df,
+    portfolio,
+    position_manager,
+    query_df,
+    read_json_file,
+    read_table,
+    reconciliation_df,
+    safe_float,
+    safe_int,
+    snapshots_df,
+    state_store,
+    trades_df,
+)
 from smartcrypto.app.pages import (
     banco_dados as banco_dados_page,
     configuracao as configuracao_page,
+    ia_rollout as ia_rollout_page,
     mercado as mercado_page,
     notificacoes as notificacoes_page,
     operacoes as operacoes_page,
@@ -33,16 +62,14 @@ from smartcrypto.common.env import (
     resolve_env,
     save_dotenv_map,
 )
-from smartcrypto.config import load_config, save_config
 from smartcrypto.infra.notifications import NtfyClient
 from smartcrypto.runtime.cache import (
+    cache_symbol_token,
     dashboard_cache_dir,
     market_cache_file,
     runtime_status_cache_file,
 )
-from smartcrypto.state.portfolio import Portfolio
-from smartcrypto.state.position_manager import PositionManager
-from smartcrypto.state.store import StateStore
+from smartcrypto.runtime.status import runtime_status_summary
 
 st.set_page_config(
     page_title="SmartCrypto Dashboard", layout="wide", initial_sidebar_state="expanded"
@@ -52,6 +79,10 @@ APP_TITLE = app_styles.APP_TITLE
 APP_SUBTITLE = app_styles.APP_SUBTITLE
 AUTO_REFRESH_PAGES = app_session.AUTO_REFRESH_PAGES
 ACTIVE_DISPATCH_LOCK_STATUSES = {"pending_submit", "submit_unknown", "submitted", "recovered_open"}
+
+IA_ROLLOUT_PAGE_LABEL = "IA & Rollout"
+if IA_ROLLOUT_PAGE_LABEL not in app_session.PAGE_OPTIONS:
+    app_session.PAGE_OPTIONS = [*app_session.PAGE_OPTIONS, IA_ROLLOUT_PAGE_LABEL]
 
 
 def inject_styles() -> None:
@@ -68,14 +99,57 @@ def chip_html(label: str, value: str, tone: str = "neutral") -> str:
     return f'<span class="sc-chip {tone}"><span>{label}</span><span>{value}</span></span>'
 
 
-def root_dir() -> Path:
-    return Path(__file__).resolve().parents[2]
+def normalized_execution_mode(cfg: dict[str, Any]) -> str:
+    mode = str(cfg.get("execution", {}).get("mode", "paper") or "paper").strip().lower()
+    if mode == "dry_run":
+        return "paper"
+    return mode if mode in {"paper", "live"} else "paper"
 
 
-def config_path() -> Path:
-    primary = root_dir() / DEFAULT_CONFIG_PATH
-    legacy = root_dir() / "config.yml"
-    return primary if primary.exists() else legacy
+def dashboard_db_identity(cfg: dict[str, Any]) -> dict[str, str]:
+    try:
+        return state_store(cfg).read_operational_identity()
+    except Exception:
+        return {}
+
+
+def dashboard_profile_summary(cfg: dict[str, Any], operational_status: dict[str, Any] | None = None) -> dict[str, str]:
+    operational_status = operational_status or {}
+    manifest = dict(operational_status.get("manifest", {}) or {})
+    identity = dashboard_db_identity(cfg)
+    profile = str(identity.get("db_profile_id") or manifest.get("experiment_profile") or "n/d")
+    role = str(identity.get("db_role") or normalized_execution_mode(cfg) or "n/d")
+    symbol = str(identity.get("db_symbol") or cfg.get("market", {}).get("symbol", "n/d") or "n/d")
+    return {
+        "profile": profile,
+        "role": role.upper(),
+        "symbol": symbol.upper(),
+    }
+
+
+def dashboard_warnings(cfg: dict[str, Any], operational_status: dict[str, Any] | None = None) -> list[str]:
+    operational_status = operational_status or {}
+    warnings: list[str] = []
+    mode = normalized_execution_mode(cfg)
+    manifest = dict(operational_status.get("manifest", {}) or {})
+    preflight = dict(operational_status.get("preflight", {}) or {})
+    identity = dashboard_db_identity(cfg)
+    config_name = config_path().name.lower()
+
+    if mode == "live":
+        warnings.append("Dashboard carregado com perfil LIVE. Use-o apenas para observação e diagnóstico.")
+    if config_name in {"live.yml", "config.live.yml"}:
+        warnings.append("O dashboard está usando um arquivo de configuração live.")
+    if str(preflight.get("status", "")).lower() not in {"", "ok"}:
+        warnings.append(f"Pré-flight reporta {str(preflight.get('status', 'unknown')).upper()}.")
+    expected_role = mode
+    current_role = str(identity.get("db_role", "")).strip().lower()
+    if current_role and current_role != expected_role:
+        warnings.append(f"DB com identidade {current_role} divergente do modo {expected_role}.")
+    manifest_mode = str(manifest.get("mode", "")).strip().lower()
+    if manifest_mode and manifest_mode != mode:
+        warnings.append(f"Manifesto operacional em {manifest_mode} diverge da configuração {mode}.")
+    return warnings
 
 
 def get_query_value(name: str, default: str) -> str:
@@ -97,51 +171,6 @@ def set_query_value(name: str, value: str) -> None:
 
 def market_symbol_exchange(cfg: dict[str, Any]) -> str:
     return cache_symbol_token(str(cfg.get("market", {}).get("symbol", "USDT/BRL")))
-
-
-def safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except Exception:
-        return default
-
-
-def parse_datetime_series(values: Any) -> pd.Series:
-    series = pd.Series(values)
-    try:
-        parsed = pd.to_datetime(series, format="ISO8601", errors="coerce", utc=True)
-    except Exception:
-        parsed = pd.to_datetime(series, errors="coerce", utc=True)
-    if parsed.isna().any():
-        try:
-            fallback = pd.to_datetime(
-                series[parsed.isna()], format="mixed", errors="coerce", utc=True
-            )
-            parsed.loc[parsed.isna()] = fallback
-        except Exception:
-            fallback = pd.to_datetime(series[parsed.isna()], errors="coerce", utc=True)
-            parsed.loc[parsed.isna()] = fallback
-    return parsed
-
-
-def load_cfg() -> dict[str, Any]:
-    path = config_path()
-    return load_config(path)
-
-
-def save_cfg(cfg: dict[str, Any]) -> None:
-    save_config(config_path(), cfg)
 
 
 def write_market_cache_df(cfg: dict[str, Any], interval: str, df: pd.DataFrame) -> Path:
@@ -257,16 +286,6 @@ def open_orders_cache_file(cfg: dict[str, Any]) -> Path:
     )
 
 
-def read_json_file(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return {}
-        return cast(dict[str, Any], payload)
-    except Exception:
-        return {}
-
-
 @st.cache_data(ttl=5, show_spinner=False)
 def load_market_cache_df(path_str: str) -> pd.DataFrame:
     path = Path(path_str)
@@ -294,110 +313,173 @@ def load_market_cache_df(path_str: str) -> pd.DataFrame:
     return df[["ts", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
-def db_path_from_cfg(cfg: dict[str, Any]) -> Path:
-    raw = str(
-        cfg.get("storage", {}).get("db_path", "data/usdtbrl_live.sqlite")
-        or "data/usdtbrl_live.sqlite"
-    )
-    path = Path(raw)
-    if not path.is_absolute():
-        path = root_dir() / path
-    return path
-
-
-def state_store(cfg: dict[str, Any]) -> StateStore:
-    return StateStore(str(db_path_from_cfg(cfg)))
-
-
-def position_manager(cfg: dict[str, Any]) -> PositionManager:
-    return PositionManager(state_store(cfg))
-
-
-def portfolio(cfg: dict[str, Any]) -> Portfolio:
-    return Portfolio(state_store(cfg), position_manager=position_manager(cfg))
-
-
-def query_df(cfg: dict[str, Any], sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    path = db_path_from_cfg(cfg)
-    if not path.exists():
-        return pd.DataFrame()
-    with sqlite3.connect(path) as conn:
-        try:
-            return pd.read_sql_query(sql, conn, params=params)
-        except Exception:
-            return pd.DataFrame()
-
-
-def list_tables(cfg: dict[str, Any]) -> list[str]:
-    path = db_path_from_cfg(cfg)
-    if not path.exists():
-        return []
-    with sqlite3.connect(path) as conn:
-        rows = conn.execute(
-            "select name from sqlite_master where type='table' order by name"
-        ).fetchall()
-    return [row[0] for row in rows]
-
-
-def read_table(cfg: dict[str, Any], table: str, limit: int = 200) -> pd.DataFrame:
-    if table not in list_tables(cfg):
-        return pd.DataFrame()
-    sql = f"select * from {table} order by rowid desc limit ?"
-    return query_df(cfg, sql, (int(limit),))
-
-
 
 def load_runtime_status(cfg: dict[str, Any]) -> dict[str, Any]:
-    payload = read_json_file(runtime_status_cache_file(cfg))
-    status_obj = payload.get("status", {}) if isinstance(payload, dict) else {}
-    if isinstance(status_obj, dict) and status_obj:
-        return cast(dict[str, Any], status_obj)
-    store = state_store(cfg)
-    runtime_portfolio = portfolio(cfg).runtime_view(
-        mark_price_brl=0.0,
-        initial_cash_brl=safe_float(cfg.get("portfolio", {}).get("initial_cash_brl", 0.0)),
+    return load_runtime_status_fallback(cfg, runtime_status_cache_file)
+
+
+def load_operational_status(cfg: dict[str, Any], status: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        return runtime_status_summary(
+            cfg,
+            state_store(cfg),
+            price=safe_float((status or {}).get("price_brl", 0.0)),
+        )
+    except Exception:
+        return {
+            "manifest": dict(cfg.get("__operational_manifest", {}) or {}),
+            "preflight": dict(cfg.get("__preflight", {}) or {}),
+            "flags": dict(cfg.get("__feature_flags", {}) or {}),
+            "mode": str(cfg.get("execution", {}).get("mode", "") or ""),
+            "ai_summary": {
+                "total": 0,
+                "divergence_count": 0,
+                "veto_count": 0,
+                "override_count": 0,
+                "stages": {},
+                "latest_stage": "disabled",
+            },
+            "critical_events": [],
+            "runtime": status or {},
+        }
+
+
+def render_operational_status_block(cfg: dict[str, Any], operational_status: dict[str, Any]) -> None:
+    manifest = dict(operational_status.get("manifest", {}) or {})
+    preflight = dict(operational_status.get("preflight", {}) or {})
+    ai_summary = dict(operational_status.get("ai_summary", {}) or {})
+    flags = dict(operational_status.get("flags", {}) or {})
+    active_flags = [name for name, enabled in flags.items() if bool(enabled)]
+    critical_events = list(operational_status.get("critical_events", []) or [])
+    latest_event = critical_events[0] if critical_events else {}
+    profile = dashboard_profile_summary(cfg, operational_status)
+    st.markdown(
+        f"""
+        <div class="sc-card">
+            <div class="sc-section-title">Manifesto operacional</div>
+            <div class="sc-kv"><span>Modo efetivo</span><span>{str(manifest.get("mode", normalized_execution_mode(cfg))).upper()}</span></div>
+            <div class="sc-kv"><span>Perfil</span><span>{profile["profile"]}</span></div>
+            <div class="sc-kv"><span>Papel do DB</span><span>{profile["role"]}</span></div>
+            <div class="sc-kv"><span>Config</span><span>{Path(str(manifest.get("config_path", cfg.get("__config_path", "")))).name or "n/d"}</span></div>
+            <div class="sc-kv"><span>DB</span><span>{Path(str(manifest.get("db_path", cfg.get("storage", {}).get("db_path", "")))).name or "n/d"}</span></div>
+            <div class="sc-kv"><span>Build</span><span>{str(manifest.get("build_id", "n/d")) or "n/d"}</span></div>
+            <div class="sc-kv"><span>Run ID</span><span>{str(manifest.get("run_id", operational_status.get("run_id", "n/d"))) or "n/d"}</span></div>
+            <div class="sc-kv"><span>Pré-flight</span><span>{str(preflight.get("status", "unknown")).upper()}</span></div>
+            <div class="sc-kv"><span>Flags ativas</span><span>{len(active_flags)}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    return {
-        "time": "",
-        "price_brl": 0.0,
-        "paused": bool(store.get_flag("paused", False)),
-        "position": runtime_portfolio.position,
-        "portfolio": {
-            "cash_brl": runtime_portfolio.cash_brl,
-            "equity_brl": runtime_portfolio.equity_brl,
-            "position_notional_brl": runtime_portfolio.position_notional_brl,
-            "invested_brl": runtime_portfolio.invested_brl,
-            "unrealized_pnl_brl": runtime_portfolio.unrealized_pnl_brl,
-            "realized_pnl_brl": runtime_portfolio.realized_pnl_brl,
-            "drawdown_pct": runtime_portfolio.drawdown_pct,
-        },
-        "cash_brl": runtime_portfolio.cash_brl,
-        "equity_brl": runtime_portfolio.equity_brl,
-        "flags": {
-            "force_sell_requested": bool(store.get_flag("force_sell_requested", False)),
-            "reset_cycle_requested": bool(store.get_flag("reset_cycle_requested", False)),
-            "reentry_block_until": store.get_flag("reentry_block_until", 0),
-            "reentry_remaining_seconds": 0,
-            "reentry_price_below": store.get_flag("reentry_price_below", 0.0),
-            "live_reconcile_required": bool(store.get_flag("live_reconcile_required", False)),
-            "consecutive_error_count": safe_int(store.get_flag("consecutive_error_count", 0)),
-        },
-        "live_hardening": {
-            "active_dispatch_locks": [],
-        },
-    }
+    if active_flags:
+        st.caption("Flags ativas: " + ", ".join(active_flags[:8]))
+    for warning_text in dashboard_warnings(cfg, operational_status):
+        st.warning(warning_text)
+    if latest_event:
+        st.caption(
+            f"Último evento crítico: {latest_event.get('level', '')} • {latest_event.get('event', '')} • {latest_event.get('ts', '')}"
+        )
+    st.caption(
+        "IA: decisões={total} • divergências={divergence_count} • vetos={veto_count} • overrides={override_count} • estágio={latest_stage}".format(
+            total=ai_summary.get("total", 0),
+            divergence_count=ai_summary.get("divergence_count", 0),
+            veto_count=ai_summary.get("veto_count", 0),
+            override_count=ai_summary.get("override_count", 0),
+            latest_stage=ai_summary.get("latest_stage", "disabled"),
+        )
+    )
 
 
-def load_open_orders_cache(cfg: dict[str, Any]) -> pd.DataFrame:
-    payload = read_json_file(open_orders_cache_file(cfg))
-    rows = payload.get("orders", []) if isinstance(payload, dict) else []
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    if "updated_at" in df.columns:
-        df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce", utc=True)
-    return df
 
+def render_top_operational_alert(status: dict[str, Any], operational_status: dict[str, Any] | None = None) -> None:
+    operational_status = operational_status or {}
+    health = dict(status.get("health", {}) or {})
+    issues = list(health.get("issues", []) or [])
+    recent_errors = list(health.get("recent_error_logs", []) or [])
+    paused = bool(status.get("paused", False))
+    flags = dict(status.get("flags", {}) or {})
+    critical_events = list(operational_status.get("critical_events", []) or [])
+
+    tone = "info"
+    title = ""
+    details: list[str] = []
+
+    latest_recent = recent_errors[-1] if recent_errors else {}
+    latest_critical = critical_events[0] if critical_events else {}
+
+    if paused:
+        tone = "bad"
+        title = "Robô pausado"
+        details.append("O runtime está pausado e não vai abrir novas operações até ser reativado.")
+    if any(str(item.get("event", "")).lower() == "circuit_breaker_paused" for item in recent_errors):
+        tone = "bad"
+        title = "Circuit breaker acionado"
+        details.append("O bot entrou em proteção após falhas consecutivas no runtime.")
+    if flags.get("live_reconcile_required", False):
+        tone = "warn"
+        title = title or "Reconciliação pendente"
+        details.append("Existe reconciliação pendente antes de novas ações operacionais.")
+    if latest_recent:
+        event_name = str(latest_recent.get("event", "") or "erro_recente")
+        error_fields = dict(latest_recent.get("fields", {}) or {})
+        error_text = str(error_fields.get("error", "") or "").strip()
+        details.append(f"Último evento: {event_name}.")
+        if error_text:
+            details.append(error_text[:220])
+    elif latest_critical:
+        tone = "warn" if tone == "info" else tone
+        title = title or "Atenção operacional"
+        details.append(
+            f"Evento crítico recente: {latest_critical.get('event', 'n/d')} em {latest_critical.get('ts', 'n/d')}."
+        )
+
+    if not title and issues:
+        tone = "warn"
+        title = "Atenção operacional"
+        details.extend(str(item.get("message", "") or "").strip() for item in issues[:2] if item.get("message"))
+
+    if not title:
+        return
+
+    details_html = "".join(
+        f"<li>{detail}</li>" for detail in details if str(detail).strip()
+    )
+    st.markdown(
+        f"""
+        <div class="sc-operational-banner {tone}">
+            <div class="sc-operational-banner-title">{title}</div>
+            <ul class="sc-operational-banner-list">{details_html}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_panel(
+    cfg: dict[str, Any],
+    status: dict[str, Any],
+    operational_status: dict[str, Any],
+    page_options: list[str],
+    page: str,
+) -> None:
+    profile = dashboard_profile_summary(cfg, operational_status)
+    with st.sidebar:
+        st.markdown("## Painel do robô")
+        render_sidebar_runtime_controls(cfg, status)
+        st.markdown("### Navegação")
+        render_sidebar_navigation(page_options, page)
+        st.markdown(
+            f"""
+            <div class="sc-sidebar-card">
+                <div class="sc-sidebar-kv"><span>DB</span><strong>{db_path_from_cfg(cfg).name}</strong></div>
+                <div class="sc-sidebar-kv"><span>Config</span><strong>{config_path().name}</strong></div>
+                <div class="sc-sidebar-kv"><span>Perfil</span><strong>{profile["profile"]}</strong></div>
+                <div class="sc-sidebar-kv"><span>Papel do DB</span><strong>{profile["role"]}</strong></div>
+                <div class="sc-sidebar-kv"><span>Cache</span><strong>{dashboard_cache_dir(cfg).name}</strong></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_operational_status_block(cfg, operational_status)
 
 def format_money(value: Any) -> str:
     number = safe_float(value)
@@ -653,6 +735,92 @@ def filter_executions_for_chart_window(
     return visible.sort_values("created_at").reset_index(drop=True)
 
 
+
+def _aligned_trade_pins(
+    trade_window: pd.DataFrame,
+    df: pd.DataFrame,
+    interval_label: str,
+) -> pd.DataFrame:
+    if trade_window.empty or "created_at" not in trade_window.columns:
+        return pd.DataFrame()
+    aligned = trade_window.copy()
+    aligned["created_at"] = parse_datetime_series(aligned["created_at"])
+    aligned = aligned.dropna(subset=["created_at"]).sort_values("created_at").reset_index(drop=True)
+    if aligned.empty:
+        return pd.DataFrame()
+    candles = pd.DataFrame({"pin_x": pd.to_datetime(df["ts"], utc=True)}).sort_values("pin_x")
+    tolerance = chart_interval_timedelta(interval_label, df)
+    merged = pd.merge_asof(
+        aligned,
+        candles,
+        left_on="created_at",
+        right_on="pin_x",
+        direction="nearest",
+        tolerance=tolerance,
+    )
+    merged["pin_x"] = merged["pin_x"].fillna(merged["created_at"])
+    return merged
+
+
+def _add_trade_pin_layer(
+    fig: go.Figure,
+    trades: pd.DataFrame,
+    *,
+    side: str,
+    marker_symbol: str,
+    marker_color: str,
+    marker_border: str,
+    text_color: str,
+    label_text: str,
+    text_position: str,
+    row: int,
+    col: int,
+) -> None:
+    side_df = trades[trades["side"].astype(str).str.lower() == side].copy()
+    if side_df.empty:
+        return
+    for _, entry in side_df.tail(24).iterrows():
+        fig.add_vline(
+            x=entry["pin_x"],
+            line_color=marker_color,
+            line_dash="dot",
+            line_width=1.1,
+            opacity=0.24,
+            row=row,
+            col=col,
+        )
+    hovertemplate = (
+        f"{label_text}<br>%{{customdata[0]}}<br>Preço: R$ %{{y:.4f}}"
+        "<br>Qtd: %{customdata[1]:.4f}<extra></extra>"
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=side_df["pin_x"],
+            y=side_df["price_brl"],
+            mode="markers+text",
+            text=[label_text[0]] * len(side_df),
+            textposition="middle center",
+            textfont=dict(size=10, color=text_color, family="Arial Black"),
+            name=label_text,
+            marker=dict(
+                symbol=marker_symbol,
+                size=19,
+                color=marker_color,
+                line=dict(color=marker_border, width=1.6),
+            ),
+            customdata=list(
+                zip(
+                    side_df["created_at"].dt.strftime("%d/%m/%Y %H:%M:%S"),
+                    pd.to_numeric(side_df.get("qty_usdt", 0.0), errors="coerce").fillna(0.0),
+                )
+            ),
+            hovertemplate=hovertemplate,
+            cliponaxis=False,
+        ),
+        row=row,
+        col=col,
+    )
+
 def interval_label_from_code(code: str) -> str:
     normalized = str(code or "1h").lower()
     for label, meta in interval_map().items():
@@ -756,47 +924,31 @@ def build_market_figure(
     if not trade_window.empty and {"created_at", "price_brl", "side"}.issubset(
         trade_window.columns
     ):
-        buy_df = trade_window[trade_window["side"].astype(str).str.lower() == "buy"]
-        sell_df = trade_window[trade_window["side"].astype(str).str.lower() == "sell"]
-        if not buy_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=buy_df["created_at"],
-                    y=buy_df["price_brl"],
-                    mode="markers+text",
-                    text=["B"] * len(buy_df),
-                    textposition="top center",
-                    textfont=dict(size=11, color="#065F46"),
-                    name="Compras",
-                    marker=dict(
-                        symbol="triangle-up",
-                        size=18,
-                        color="#0ECB81",
-                        line=dict(color="#064E3B", width=1.2),
-                    ),
-                    hovertemplate="Compra<br>%{x}<br>Preço: R$ %{y:.4f}<extra></extra>",
-                ),
+        pin_window = _aligned_trade_pins(trade_window, df, interval_label)
+        if not pin_window.empty:
+            _add_trade_pin_layer(
+                fig,
+                pin_window,
+                side="buy",
+                marker_symbol="triangle-up",
+                marker_color="#16A34A",
+                marker_border="#14532D",
+                text_color="#F8FAFC",
+                label_text="Compra",
+                text_position="top center",
                 row=1,
                 col=1,
             )
-        if not sell_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=sell_df["created_at"],
-                    y=sell_df["price_brl"],
-                    mode="markers+text",
-                    text=["S"] * len(sell_df),
-                    textposition="bottom center",
-                    textfont=dict(size=11, color="#991B1B"),
-                    name="Vendas",
-                    marker=dict(
-                        symbol="triangle-down",
-                        size=18,
-                        color="#F6465D",
-                        line=dict(color="#7F1D1D", width=1.2),
-                    ),
-                    hovertemplate="Venda<br>%{x}<br>Preço: R$ %{y:.4f}<extra></extra>",
-                ),
+            _add_trade_pin_layer(
+                fig,
+                pin_window,
+                side="sell",
+                marker_symbol="triangle-down",
+                marker_color="#DC2626",
+                marker_border="#7F1D1D",
+                text_color="#F8FAFC",
+                label_text="Venda",
+                text_position="bottom center",
                 row=1,
                 col=1,
             )
@@ -963,141 +1115,16 @@ def interval_map() -> dict[str, dict[str, Any]]:
     }
 
 
-def trades_df(cfg: dict[str, Any], limit: int = 500) -> pd.DataFrame:
-    df = query_df(cfg, "select * from trades order by id desc limit ?", (int(limit),))
-    if df.empty:
-        return df
-    for col in ["price_brl", "qty_usdt", "brl_value", "fee_brl"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    if "created_at" in df.columns:
-        df["created_at"] = parse_datetime_series(df["created_at"])
-    return df
-
-
-def cycles_df(cfg: dict[str, Any], limit: int = 500) -> pd.DataFrame:
-    df = query_df(cfg, "select * from cycles order by id desc limit ?", (int(limit),))
-    if df.empty:
-        return df
-    for col in [
-        "entry_price_brl",
-        "exit_price_brl",
-        "qty_usdt",
-        "brl_spent",
-        "brl_received",
-        "pnl_brl",
-        "pnl_pct",
-    ]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    if "opened_at" in df.columns:
-        df["opened_at"] = parse_datetime_series(df["opened_at"])
-    if "closed_at" in df.columns:
-        df["closed_at"] = parse_datetime_series(df["closed_at"])
-    return df
-
-
-def snapshots_df(cfg: dict[str, Any], limit: int = 1000) -> pd.DataFrame:
-    df = query_df(cfg, "select * from snapshots order by id desc limit ?", (int(limit),))
-    if df.empty:
-        return df
-    if "ts" in df.columns:
-        df["ts"] = parse_datetime_series(df["ts"])
-    for col in ["price_brl", "cash_brl", "equity_brl"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    return df.sort_values("ts")
-
-
-def planned_orders_df(cfg: dict[str, Any], limit: int = 50) -> pd.DataFrame:
-    if "planned_orders" in list_tables(cfg):
-        df = query_df(cfg, "select * from planned_orders order by id desc limit ?", (int(limit),))
-    elif "pending_orders" in list_tables(cfg):
-        df = query_df(cfg, "select * from pending_orders order by id desc limit ?", (int(limit),))
-    else:
-        df = pd.DataFrame()
-    if df.empty:
-        return df
-    for col in ["price_brl", "qty_usdt", "brl_value"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    return df
-
-
-def order_states_df(cfg: dict[str, Any], limit: int = 100) -> pd.DataFrame:
-    if "order_events" not in list_tables(cfg):
-        return pd.DataFrame()
-    sql = """
-        with ranked as (
-            select
-                *,
-                row_number() over (
-                    partition by bot_order_id
-                    order by datetime(event_time) desc, id desc
-                ) as rn
-            from order_events
-        )
-        select
-            bot_order_id,
-            parent_bot_order_id,
-            exchange_order_id,
-            client_order_id,
-            side,
-            order_type,
-            state,
-            reason,
-            price_brl,
-            qty_usdt,
-            executed_qty_usdt,
-            brl_value,
-            source,
-            note,
-            event_time
-        from ranked
-        where rn = 1
-        order by datetime(event_time) desc, bot_order_id desc
-        limit ?
-    """
-    df = query_df(cfg, sql, (int(limit),))
-    if df.empty:
-        return df
-    for col in ["price_brl", "qty_usdt", "executed_qty_usdt", "brl_value"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    if "event_time" in df.columns:
-        df["event_time"] = parse_datetime_series(df["event_time"])
-    return df
-
-
-def bot_events_df(cfg: dict[str, Any], limit: int = 200) -> pd.DataFrame:
-    df = query_df(cfg, "select * from bot_events order by id desc limit ?", (int(limit),))
-    if df.empty:
-        return df
-    if "ts" in df.columns:
-        df["ts"] = parse_datetime_series(df["ts"])
-    return df
-
-
-def dispatch_locks_df(cfg: dict[str, Any], limit: int = 50) -> pd.DataFrame:
-    if "order_dispatch_locks" not in list_tables(cfg):
-        return pd.DataFrame()
-    df = query_df(cfg, "select * from order_dispatch_locks order by id desc limit ?", (int(limit),))
-    return df
-
-
-def reconciliation_df(cfg: dict[str, Any], limit: int = 50) -> pd.DataFrame:
-    if "reconciliation_audit" not in list_tables(cfg):
-        return pd.DataFrame()
-    df = query_df(cfg, "select * from reconciliation_audit order by id desc limit ?", (int(limit),))
-    return df
-
-
-def render_header(cfg: dict[str, Any], status: dict[str, Any]) -> None:
-    mode = str(cfg.get("execution", {}).get("mode", "dry_run")).upper()
+def render_header(cfg: dict[str, Any], status: dict[str, Any], operational_status: dict[str, Any] | None = None) -> None:
+    mode = normalized_execution_mode(cfg).upper()
     symbol = str(cfg.get("market", {}).get("symbol", "USDT/BRL"))
     time_text = str(status.get("time", "") or "sem snapshot")
     paused = bool(status.get("paused", False))
     flags = status.get("flags", {}) or {}
+    operational_status = operational_status or {}
+    manifest = dict(operational_status.get("manifest", {}) or {})
+    preflight = dict(operational_status.get("preflight", {}) or {})
+    profile = dashboard_profile_summary(cfg, operational_status)
 
     left, right = st.columns([1.5, 1])
     with left:
@@ -1105,6 +1132,12 @@ def render_header(cfg: dict[str, Any], status: dict[str, Any]) -> None:
         st.caption(f"{APP_SUBTITLE} • {symbol} • snapshot {time_text}")
         chips = [
             chip_html("Modo", mode, "warn" if mode == "LIVE" else "good"),
+            chip_html("DB", profile["role"], "warn" if profile["role"] == "LIVE" else "good"),
+            chip_html(
+                "Pré-flight",
+                str(preflight.get("status", "unknown")).upper(),
+                "good" if str(preflight.get("status", "")).lower() == "ok" else "bad",
+            ),
             chip_html("Bot", "PAUSADO" if paused else "ATIVO", tone_for_bool(paused, invert=True)),
             chip_html(
                 "Reconciliação",
@@ -1118,8 +1151,16 @@ def render_header(cfg: dict[str, Any], status: dict[str, Any]) -> None:
             ),
         ]
         st.markdown(f'<div class="sc-chip-wrap">{"".join(chips)}</div>', unsafe_allow_html=True)
+        render_top_operational_alert(status, operational_status)
+        for warning_text in dashboard_warnings(cfg, operational_status):
+            st.warning(warning_text)
     with right:
         market_tf = str(cfg.get("market", {}).get("timeframe", "1m"))
+        cfg_status = config_consistency_status()
+        if cfg_status["both_exist"] and not cfg_status["same_content"]:
+            mode_text = f"principal={cfg_status['primary_mode'] or 'n/d'} • legado={cfg_status['legacy_mode'] or 'n/d'}"
+            st.warning(f"Arquivos de configuração divergentes detectados: {mode_text}. O dashboard usa {cfg_status['canonical_path'].name}.")
+
         st.markdown(
             f"""
             <div class="sc-card">
@@ -1127,12 +1168,15 @@ def render_header(cfg: dict[str, Any], status: dict[str, Any]) -> None:
                 <div class="sc-kv"><span>Par</span><span>{symbol}</span></div>
                 <div class="sc-kv"><span>Timeframe base</span><span>{market_tf}</span></div>
                 <div class="sc-kv"><span>Modo</span><span>{mode}</span></div>
+                <div class="sc-kv"><span>Perfil</span><span>{profile["profile"]}</span></div>
+                <div class="sc-kv"><span>Papel do DB</span><span>{profile["role"]}</span></div>
+                <div class="sc-kv"><span>Build</span><span>{str(manifest.get("build_id", "n/d")) or "n/d"}</span></div>
+                <div class="sc-kv"><span>Pré-flight</span><span>{str(preflight.get("status", "unknown")).upper()}</span></div>
                 <div class="sc-kv"><span>Snapshot</span><span>{time_text}</span></div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
 
 def summary_market_interval_label(cfg: dict[str, Any]) -> str:
     base_code = str(cfg.get("market", {}).get("timeframe", "1h") or "1h")
@@ -1371,6 +1415,30 @@ def render_sidebar_navigation(page_options: list[str], current: str) -> str:
     return selected
 
 
+def render_top_navigation(page_options: list[str], current: str) -> str:
+    st.markdown('<div class="sc-top-nav-title">Abas do dashboard</div>', unsafe_allow_html=True)
+    st.caption("Use esta navegação principal. A sidebar virou complementar, para evitar depender do menu lateral.")
+    selected = current
+    columns_per_row = 4
+    for start in range(0, len(page_options), columns_per_row):
+        row = page_options[start : start + columns_per_row]
+        cols = st.columns(len(row))
+        for idx, label in enumerate(row):
+            with cols[idx]:
+                if st.button(
+                    label,
+                    key=f"top_nav_btn_{label}",
+                    width="stretch",
+                    type="primary" if label == current else "secondary",
+                ):
+                    selected = label
+    if selected != current:
+        st.session_state["nav_page"] = selected
+        set_query_value("page", selected)
+        st.rerun()
+    return selected
+
+
 def render_market(cfg: dict[str, Any], status: dict[str, Any]) -> None:
     mercado_page.render(cfg, status, sys.modules[__name__])
 
@@ -1406,7 +1474,8 @@ def render_hardening(cfg: dict[str, Any], status: dict[str, Any]) -> None:
 def main() -> None:
     inject_styles()
     cfg = load_cfg()
-    status = load_runtime_status(cfg)
+    status = load_runtime_status_fallback(cfg, runtime_status_cache_file)
+    operational_status = load_operational_status(cfg, status)
 
     app_session.ensure_session_defaults()
     page_options = list(app_session.PAGE_OPTIONS)
@@ -1417,21 +1486,22 @@ def main() -> None:
         enabled=app_session.auto_refresh_enabled() and current_page in AUTO_REFRESH_PAGES,
     )
 
-    render_header(cfg, status)
+    render_header(cfg, status, operational_status)
+    page = render_top_navigation(page_options, current_page)
+    app_session.set_current_page(page, set_query_value)
 
-    with st.sidebar:
-        render_sidebar_runtime_controls(cfg, status)
-        st.markdown("---")
-        st.markdown("### Navegação")
-        page = render_sidebar_navigation(page_options, current_page)
-        app_session.set_current_page(page, set_query_value)
-        st.markdown("---")
+    render_sidebar_panel(cfg, status, operational_status, page_options, page)
+
+    with st.expander("Status operacional detalhado", expanded=False):
+        profile = dashboard_profile_summary(cfg, operational_status)
         st.markdown(
             f"""
             <div class="sc-card">
                 <div class="sc-section-title">Ambiente</div>
                 <div class="sc-kv"><span>DB</span><span>{db_path_from_cfg(cfg).name}</span></div>
                 <div class="sc-kv"><span>Config</span><span>{config_path().name}</span></div>
+                <div class="sc-kv"><span>Perfil</span><span>{profile["profile"]}</span></div>
+                <div class="sc-kv"><span>Papel do DB</span><span>{profile["role"]}</span></div>
                 <div class="sc-kv"><span>Cache</span><span>{dashboard_cache_dir(cfg).name}</span></div>
                 <div class="sc-kv"><span>Auto refresh</span><span>{"ATIVO" if app_session.auto_refresh_enabled() and page in AUTO_REFRESH_PAGES else "PAUSADO"}</span></div>
             </div>
@@ -1457,7 +1527,13 @@ def main() -> None:
         render_ntfy(cfg)
     elif page == "Proteção":
         render_hardening(cfg, status)
+    elif page == IA_ROLLOUT_PAGE_LABEL:
+        ia_rollout_page.render(cfg, status, sys.modules[__name__])
     else:
         render_db(cfg)
 
 
+
+
+if __name__ == "__main__":
+    main()

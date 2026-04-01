@@ -16,6 +16,35 @@ def render(cfg: dict[str, Any], status: dict[str, Any], ui: Any) -> None:
 
     ui.render_time_cards(cfg, status)
 
+    panel = status.get("paper_panel", {}) or {}
+    if panel:
+        st.markdown("#### Painel operacional do paper")
+        pnl_value = ui.safe_float(panel.get("pnl_pct", 0.0))
+        pnl_text = f"{pnl_value:.2f}%"
+        if pnl_value > 0:
+            pnl_text = f":green[{pnl_text}]"
+        elif pnl_value < 0:
+            pnl_text = f":red[{pnl_text}]"
+        panel_df = pd.DataFrame(
+            [
+                {
+                    "Moeda/USDT/BRL": str(panel.get("symbol", "USDT/BRL") or "USDT/BRL"),
+                    "Modo Paper/Live": str(panel.get("mode", "paper") or "paper").upper(),
+                    "Run sim/não": "SIM" if bool(panel.get("run_active", False)) else "NÃO",
+                    "Valor de entrada": ui.format_money(panel.get("entry_price_brl", 0.0)),
+                    "Número da rampa": str(ui.safe_int(panel.get("ramp_number", 0))),
+                    "Valor médio": ui.format_money(panel.get("avg_price_brl", 0.0)),
+                    "Valor atual": ui.format_money(panel.get("current_price_brl", 0.0)),
+                    "PNL em %": pnl_text,
+                    "Número de ciclos já realizados": str(ui.safe_int(panel.get("closed_cycles", 0))),
+                    "Valor empenhado neste ciclo": ui.format_money(panel.get("invested_this_cycle_brl", 0.0)),
+                    "Lucro total de todos os ciclos": ui.format_money(panel.get("realized_profit_total_brl", 0.0)),
+                    "Soma do montante empenhado em todos os ciclos": ui.format_money(panel.get("total_spent_all_cycles_brl", 0.0)),
+                }
+            ]
+        )
+        st.dataframe(panel_df, width="stretch", hide_index=True)
+
     metrics_row.render(
         [
             {"label": "Preço", "value": ui.format_money(status.get("price_brl", 0.0))},

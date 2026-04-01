@@ -8,7 +8,7 @@ exchange:
   request_retries: 3
   request_backoff_seconds: 1.0
 storage:
-  db_path: data/usdtbrl_live.sqlite
+  db_path: data/usdtbrl_paper.sqlite
 runtime:
   loop_seconds: 5
   deactivate_after_sell: false
@@ -19,6 +19,8 @@ runtime:
   circuit_breaker_cooldown_seconds: 300
   reconcile_pause_on_mismatch: true
   reconcile_qty_tolerance_usdt: 0.0001
+  environment: paper_default
+  reconcile_allow_extra_base_asset_balance: false
 portfolio:
   initial_cash_brl: 528.0
 market:
@@ -27,7 +29,7 @@ market:
   lookback_bars: 240
   research_lookback_bars: 800
 execution:
-  mode: live
+  mode: paper
   entry_order_type: limit
   exit_order_type: limit
   fee_rate: 0.001
@@ -40,6 +42,7 @@ execution:
   exit_fallback_market: false
   force_sell_market: true
   limit_time_in_force: GTC
+  allow_live: false
 risk:
   max_open_brl: 500.0
   max_daily_loss_brl: 50.0

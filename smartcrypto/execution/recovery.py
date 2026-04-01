@@ -5,8 +5,14 @@ from typing import Any
 
 import pandas as pd
 
-from smartcrypto.execution.reconcile import is_live_mode, map_exchange_order_state
+from smartcrypto.execution.controls import clear_reentry_price_block
+from smartcrypto.execution.reconcile import (
+    is_live_mode,
+    live_reconcile_qty_tolerance,
+    map_exchange_order_state,
+)
 from smartcrypto.infra.binance_adapter import ExchangeAdapter
+from smartcrypto.domain.strategy import compute_exit_targets, strategy_params
 from smartcrypto.state.store import StateStore, utc_now
 
 
@@ -58,6 +64,96 @@ def mark_dispatch_unknown(
     )
 
 
+def _apply_recovered_fill(
+    cfg: dict[str, Any],
+    store: StateStore,
+    lock: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    side = str(lock.get("side") or "")
+    reason = str(lock.get("reason") or "")
+    regime = str(store.get_position().regime or "sideways")
+    fee_rate = float(cfg.get("execution", {}).get("fee_rate", 0.001) or 0.001)
+    client_order_id = str(snapshot.get("client_order_id") or "") or None
+    exchange_order_id = str(snapshot.get("order_id") or "") or None
+    exec_price = float(snapshot.get("price_brl") or 0.0)
+    exec_qty = float(snapshot.get("executed_qty_usdt") or snapshot.get("qty_usdt") or 0.0)
+    exec_quote = float(snapshot.get("quote_brl") or 0.0)
+    order_type = str(lock.get("order_type") or snapshot.get("order_type") or "")
+    run_id = str(cfg.get("__run_id", "") or "")
+
+    if exec_price <= 0 or exec_qty <= 0 or exec_quote <= 0:
+        return
+
+    if side == "buy":
+        position = store.get_position()
+        params = strategy_params(cfg, regime)
+        new_qty = float(position.qty_usdt) + exec_qty
+        new_spent = float(position.brl_spent) + exec_quote + (exec_quote * fee_rate)
+        avg_price_brl = new_spent / max(new_qty, 1e-9)
+        tp_price_brl, stop_price_brl = compute_exit_targets(
+            qty_usdt=new_qty,
+            brl_spent=new_spent,
+            avg_price_brl=avg_price_brl,
+            params=params,
+            cfg=cfg,
+        )
+        store.apply_buy_fill(
+            bot_order_id=str(lock.get("bot_order_id") or ""),
+            reason=reason,
+            regime=regime,
+            mode=str(cfg.get("execution", {}).get("mode", "") or ""),
+            fee_rate=fee_rate,
+            exec_price_brl=exec_price,
+            exec_qty_usdt=exec_qty,
+            exec_quote_brl=exec_quote,
+            tp_price_brl=tp_price_brl,
+            stop_price_brl=stop_price_brl,
+            order_type=order_type,
+            source="exchange_recovery",
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            run_id=run_id,
+        )
+        clear_reentry_price_block(store)
+        return
+
+    position = store.get_position()
+    remaining_qty = max(0.0, float(position.qty_usdt) - exec_qty)
+    remaining_spent = max(
+        0.0,
+        float(position.brl_spent)
+        - (float(position.brl_spent) * min(1.0, exec_qty / max(float(position.qty_usdt), 1e-9))),
+    )
+    remaining_avg = remaining_spent / max(remaining_qty, 1e-9) if remaining_qty > 0 else 0.0
+    params = strategy_params(cfg, regime)
+    tp_price_brl, stop_price_brl = compute_exit_targets(
+        qty_usdt=remaining_qty,
+        brl_spent=remaining_spent,
+        avg_price_brl=remaining_avg,
+        params=params,
+        cfg=cfg,
+    ) if remaining_qty > 0 else (0.0, 0.0)
+    store.apply_sell_fill(
+        bot_order_id=str(lock.get("bot_order_id") or ""),
+        reason=reason,
+        regime=regime,
+        mode=str(cfg.get("execution", {}).get("mode", "") or ""),
+        fee_rate=fee_rate,
+        exec_price_brl=exec_price,
+        exec_qty_usdt=exec_qty,
+        exec_quote_brl=exec_quote,
+        qty_tolerance_usdt=live_reconcile_qty_tolerance(cfg),
+        tp_price_brl=tp_price_brl,
+        stop_price_brl=stop_price_brl,
+        order_type=order_type,
+        source="exchange_recovery",
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        run_id=run_id,
+    )
+
+
 def recover_dispatch_locks(
     cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter
 ) -> RecoveryAction:
@@ -72,11 +168,7 @@ def recover_dispatch_locks(
         details = dict(lock.get("details") or {})
         prefix = str(details.get("client_order_id_prefix") or "")
         candidates: list[str] = []
-        for item in [
-            client_order_id,
-            f"{prefix}-L1" if prefix else "",
-            f"{prefix}-M1" if prefix else "",
-        ]:
+        for item in [client_order_id, f"{prefix}-L1" if prefix else "", f"{prefix}-M1" if prefix else ""]:
             if item and item not in candidates:
                 candidates.append(item)
         recovered = None
@@ -111,15 +203,11 @@ def recover_dispatch_locks(
                     client_order_id=str(snapshot.get("client_order_id") or ""),
                 )
             else:
-                store.clear_dispatch_lock(bot_order_id, terminal_status="terminal")
+                _apply_recovered_fill(cfg, store, lock, snapshot)
             recovered_any = True
             continue
         updated_at = pd.to_datetime(lock.get("updated_at"), errors="coerce", utc=True)
-        age_seconds = (
-            0.0
-            if pd.isna(updated_at)
-            else float((pd.Timestamp.utcnow() - updated_at).total_seconds())
-        )
+        age_seconds = 0.0 if pd.isna(updated_at) else float((pd.Timestamp.utcnow() - updated_at).total_seconds())
         if age_seconds >= inflight_order_lock_seconds(cfg):
             store.clear_dispatch_lock(bot_order_id, terminal_status="stale")
             store.add_event(

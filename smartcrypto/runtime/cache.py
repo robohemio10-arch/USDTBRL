@@ -46,11 +46,40 @@ def runtime_status_cache_file(cfg: dict[str, Any]) -> Path:
     )
 
 
+def runtime_manifest_cache_file(cfg: dict[str, Any]) -> Path:
+    return (
+        dashboard_cache_dir(cfg)
+        / f"runtime_manifest_{cache_symbol_token(cfg.get('market', {}).get('symbol', 'USDTBRL'))}.json"
+    )
+
+
+def preflight_cache_file(cfg: dict[str, Any]) -> Path:
+    return (
+        dashboard_cache_dir(cfg)
+        / f"preflight_{cache_symbol_token(cfg.get('market', {}).get('symbol', 'USDTBRL'))}.json"
+    )
+
+
 def open_orders_cache_file(cfg: dict[str, Any]) -> Path:
     return (
         dashboard_cache_dir(cfg)
         / f"open_orders_{cache_symbol_token(cfg.get('market', {}).get('symbol', 'USDTBRL'))}.json"
     )
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 def write_market_cache(cfg: dict[str, Any], interval: str, df: pd.DataFrame) -> None:
@@ -68,9 +97,7 @@ def write_market_cache(cfg: dict[str, Any], interval: str, df: pd.DataFrame) -> 
             "interval": str(interval),
             "rows": out.to_dict(orient="records"),
         }
-        market_cache_file(cfg, interval).write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
+        _write_json(market_cache_file(cfg, interval), payload)
     except Exception:
         pass
 
@@ -83,11 +110,45 @@ def write_runtime_status_cache(cfg: dict[str, Any], status: dict[str, Any]) -> N
             "execution_mode": str(cfg.get("execution", {}).get("mode", "dry_run")),
             "status": status,
         }
-        runtime_status_cache_file(cfg).write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
+        _write_json(runtime_status_cache_file(cfg), payload)
     except Exception:
         pass
+
+
+def write_runtime_manifest_cache(cfg: dict[str, Any], manifest: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "saved_at": utc_now(),
+            "symbol": str(cfg.get("market", {}).get("symbol", "")),
+            "manifest": dict(manifest or {}),
+        }
+        _write_json(runtime_manifest_cache_file(cfg), payload)
+    except Exception:
+        pass
+
+
+def read_runtime_manifest_cache(cfg: dict[str, Any]) -> dict[str, Any]:
+    payload = _read_json(runtime_manifest_cache_file(cfg))
+    manifest = payload.get("manifest", {}) if isinstance(payload, dict) else {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def write_preflight_cache(cfg: dict[str, Any], preflight: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "saved_at": utc_now(),
+            "symbol": str(cfg.get("market", {}).get("symbol", "")),
+            "preflight": dict(preflight or {}),
+        }
+        _write_json(preflight_cache_file(cfg), payload)
+    except Exception:
+        pass
+
+
+def read_preflight_cache(cfg: dict[str, Any]) -> dict[str, Any]:
+    payload = _read_json(preflight_cache_file(cfg))
+    preflight = payload.get("preflight", {}) if isinstance(payload, dict) else {}
+    return preflight if isinstance(preflight, dict) else {}
 
 
 def write_open_orders_cache(
@@ -113,9 +174,7 @@ def write_open_orders_cache(
             "error": str(error or ""),
             "orders": normalized,
         }
-        open_orders_cache_file(cfg).write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
+        _write_json(open_orders_cache_file(cfg), payload)
     except Exception:
         pass
 
@@ -124,6 +183,12 @@ def persist_dashboard_runtime_state(
     cfg: dict[str, Any], exchange: Any, status: dict[str, Any]
 ) -> None:
     write_runtime_status_cache(cfg, status)
+    manifest = cfg.get("__operational_manifest", {})
+    if isinstance(manifest, dict) and manifest:
+        write_runtime_manifest_cache(cfg, manifest)
+    preflight = cfg.get("__preflight", {})
+    if isinstance(preflight, dict) and preflight:
+        write_preflight_cache(cfg, preflight)
     if str(cfg.get("execution", {}).get("mode", "dry_run")).lower() != "live":
         write_open_orders_cache(cfg, [])
         return

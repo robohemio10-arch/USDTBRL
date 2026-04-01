@@ -66,8 +66,8 @@ class PhaseDRestartTests(unittest.TestCase):
     def test_reconcile_pauses_on_exchange_position_mismatch(self):
         exchange = FakeExchangeRecover(qty_total=7.5)
         reconcile_live_exchange_state(self.cfg, self.store, exchange, last_price=5.2)
-        self.assertFalse(self.store.get_flag("live_reconcile_required", False))
-        self.assertFalse(self.store.get_flag("paused", False))
+        self.assertTrue(self.store.get_flag("live_reconcile_required", False))
+        self.assertTrue(self.store.get_flag("paused", False))
 
     def test_recover_dispatch_lock_marks_event(self):
         self.store.upsert_dispatch_lock(
@@ -97,6 +97,8 @@ class PhaseDRestartTests(unittest.TestCase):
         events = self.store.read_df("order_events", 20)
         self.assertFalse(events.empty)
         self.assertIn("filled", set(events["state"].astype(str).str.lower()))
+        self.assertEqual(self.store.get_position().status, "open")
+        self.assertGreater(self.store.get_position().qty_usdt, 0.0)
 
 
 if __name__ == "__main__":

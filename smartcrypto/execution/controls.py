@@ -126,7 +126,9 @@ def post_sell_controls(
     reason: str,
     exit_price_brl: float,
 ) -> None:
-    pause_after_sell = bool(params.get("deactivate_after_sell", False))
+    pause_after_sell = bool(params.get("deactivate_after_sell", False)) or bool(
+        store.get_flag("pause_after_sell_requested", False)
+    )
     cooldown = 0
     runtime = cfg.get("runtime", {})
     if reason == "force_sell":
@@ -138,7 +140,12 @@ def post_sell_controls(
         cooldown = int(runtime.get("cooldown_after_profit_sell_seconds", 0) or 0)
     if pause_after_sell:
         store.set_flag("paused", True)
-        store.add_event("WARN", "bot_paused_after_sell", {"reason": reason})
+        store.set_flag("pause_after_sell_requested", False)
+        store.add_event(
+            "WARN",
+            "bot_paused_after_sell",
+            {"reason": reason, "requested": True},
+        )
     if cooldown > 0:
         set_reentry_block(store, cooldown, reason)
 

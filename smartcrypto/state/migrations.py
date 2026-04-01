@@ -194,17 +194,32 @@ MIGRATIONS: list[tuple[str, str]] = [
         create index if not exists idx_order_dispatch_locks_updated_at on order_dispatch_locks(updated_at);
         """,
     ),
+    (
+        "0003_trade_audit_and_identity",
+        """
+        alter table trades add column bot_order_id text;
+        alter table trades add column client_order_id text;
+        alter table trades add column exchange_order_id text;
+        alter table trades add column run_id text;
+        alter table trades add column source text;
+        create unique index if not exists idx_trades_bot_order_id_unique on trades(bot_order_id);
+        create index if not exists idx_trades_client_order_id on trades(client_order_id);
+        create index if not exists idx_trades_exchange_order_id on trades(exchange_order_id);
+        """,
+    ),
 ]
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
-    conn.execute("""
+    conn.execute(
+        """
         create table if not exists schema_migrations (
             id integer primary key autoincrement,
             name text not null unique,
             applied_at text not null default current_timestamp
         )
-        """)
+        """
+    )
     applied = {
         row[0]
         for row in conn.execute("select name from schema_migrations order by id asc").fetchall()
@@ -212,5 +227,10 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     for name, sql in MIGRATIONS:
         if name in applied:
             continue
-        conn.executescript(sql)
+        try:
+            conn.executescript(sql)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "duplicate column name" not in message and "already exists" not in message:
+                raise
         conn.execute("insert into schema_migrations(name) values (?)", (name,))

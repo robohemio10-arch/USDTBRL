@@ -36,7 +36,7 @@ def live_reconcile_qty_tolerance(
 
 
 def live_reconcile_allow_extra_base_asset_balance(cfg: dict[str, Any]) -> bool:
-    return bool(cfg.get("runtime", {}).get("reconcile_allow_extra_base_asset_balance", True))
+    return bool(cfg.get("runtime", {}).get("reconcile_allow_extra_base_asset_balance", False))
 
 
 def bot_managed_open_order_refs(store: StateStore, limit: int = 500) -> tuple[set[str], set[str]]:
@@ -47,7 +47,7 @@ def bot_managed_open_order_refs(store: StateStore, limit: int = 500) -> tuple[se
     if frame is None or getattr(frame, "empty", True):
         return set(), set()
 
-    active_states = {"submitted", "open_on_exchange", "partial"}
+    active_states = {"submitted", "open_on_exchange", "partial", "recovered_open"}
     active = frame[frame["state"].isin(active_states)].copy()
     if active.empty:
         return set(), set()
@@ -100,6 +100,10 @@ def map_exchange_order_state(snapshot: dict[str, Any] | None) -> str:
     return status.lower() if status else "unknown"
 
 
+def _material_qty_mismatch(local_qty: float, exchange_qty_total: float, tolerance: float) -> bool:
+    return abs(float(exchange_qty_total) - float(local_qty)) > float(tolerance)
+
+
 def reconcile_live_exchange_state(
     cfg: dict[str, Any],
     store: StateStore,
@@ -127,67 +131,69 @@ def reconcile_live_exchange_state(
             known_client_ids=known_client_ids,
         )
     ]
+    unmanaged_open_orders = [
+        order
+        for order in all_open_orders
+        if not is_bot_managed_exchange_order(
+            order,
+            known_exchange_ids=known_exchange_ids,
+            known_client_ids=known_client_ids,
+        )
+    ]
     bot_open_order_count = len(bot_open_orders)
     local_qty = float(local.qty_usdt or 0.0)
     allow_extra_balance = live_reconcile_allow_extra_base_asset_balance(cfg)
 
     mismatch_reason = None
-    if local.status == "flat":
+    if unmanaged_open_orders:
+        mismatch_reason = "unmanaged_open_orders_present"
+    elif local.status == "flat":
         if bot_open_order_count > 0:
             mismatch_reason = "bot_open_orders_exist_while_local_flat"
-        elif not allow_extra_balance and exchange_qty_total > tolerance:
+        elif exchange_qty_total > tolerance and not allow_extra_balance:
             mismatch_reason = "exchange_position_exists_while_local_flat"
-    elif local.status == "open" and exchange_qty_total + tolerance < local_qty:
-        mismatch_reason = "exchange_qty_below_local_managed_position"
+    elif _material_qty_mismatch(local_qty, exchange_qty_total, tolerance):
+        mismatch_reason = "exchange_qty_diverges_from_local_position"
 
     audit_details = {
         "tolerance_usdt": tolerance,
         "price_brl": last_price,
         "base_asset": base_asset,
         "exchange_qty_total": exchange_qty_total,
-        "local_managed_qty": local_qty,
-        "bot_open_order_count": bot_open_order_count,
-        "all_symbol_open_orders": len(all_open_orders),
-        "allow_extra_base_asset_balance": allow_extra_balance,
+        "local_qty_usdt": local_qty,
+        "allow_extra_balance": allow_extra_balance,
+        "bot_open_orders": bot_open_orders,
+        "unmanaged_open_orders": unmanaged_open_orders,
+        "known_exchange_ids": sorted(known_exchange_ids),
+        "known_client_ids": sorted(known_client_ids),
     }
 
     if mismatch_reason:
-        store.set_flag("live_reconcile_required", True)
         store.add_reconciliation_audit(
-            action=mismatch_reason,
+            action="mismatch",
             local_status=local.status,
             local_qty_usdt=local_qty,
             exchange_qty_usdt=exchange_qty_total,
             exchange_open_orders=bot_open_order_count,
-            details=audit_details,
+            details={**audit_details, "reason": mismatch_reason},
         )
+        store.set_flag("live_reconcile_required", True)
         if live_reconcile_pause_on_mismatch(cfg):
             store.set_flag("paused", True)
-        if not bool(store.get_flag(f"reconcile_notice_{mismatch_reason}", False)):
             store.add_event(
                 "ERROR",
-                mismatch_reason,
-                {
-                    "local_status": local.status,
-                    "local_qty_usdt": local_qty,
-                    "exchange_qty_total": exchange_qty_total,
-                    "bot_open_order_count": bot_open_order_count,
-                    "all_symbol_open_orders": len(all_open_orders),
-                    "tolerance_usdt": tolerance,
-                    "allow_extra_base_asset_balance": allow_extra_balance,
-                },
+                "live_reconcile_mismatch",
+                {**audit_details, "reason": mismatch_reason},
             )
-            store.set_flag(f"reconcile_notice_{mismatch_reason}", True)
-        return ReconcileResult(needs_action=True, reason=str(mismatch_reason))
+        return ReconcileResult(needs_action=True, reason=mismatch_reason)
 
+    store.add_reconciliation_audit(
+        action="ok",
+        local_status=local.status,
+        local_qty_usdt=local_qty,
+        exchange_qty_usdt=exchange_qty_total,
+        exchange_open_orders=bot_open_order_count,
+        details=audit_details,
+    )
     store.set_flag("live_reconcile_required", False)
-    for notice_key in (
-        "reconcile_notice_exchange_position_exists_while_local_flat",
-        "reconcile_notice_local_position_exists_while_exchange_flat",
-        "reconcile_notice_local_exchange_qty_mismatch",
-        "reconcile_notice_exchange_open_orders_exist_while_local_flat",
-        "reconcile_notice_bot_open_orders_exist_while_local_flat",
-        "reconcile_notice_exchange_qty_below_local_managed_position",
-    ):
-        store.set_flag(notice_key, False)
     return ReconcileResult(needs_action=False, reason="ok")

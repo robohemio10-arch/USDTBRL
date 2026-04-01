@@ -1,55 +1,46 @@
-# Runbook operacional — SmartCrypto USDT/BRL
+# Runbook Operacional
 
-## Subida padrão
-1. `python scripts/validate_config.py --config config/config.yml`
-2. `python scripts/migrate_db.py --config config/config.yml`
-3. `python scripts/backfill_market_cache.py --config config/config.yml`
-4. `python scripts/healthcheck.py --config config/config.yml`
-5. `python bot.py --config config/config.yml --status`
-6. `python -m streamlit run dashboard.py`
+## Perfis suportados
 
-## Antes de entrar em live
-- conferir `.env` com chaves válidas
-- confirmar `execution.mode: live`
-- validar healthcheck sem warnings críticos
-- verificar `paused = false`
-- verificar `live_reconcile_required = false`
-- verificar `active_dispatch_locks = 0`
+- Paper padrão: `config/config.yml`
+- Paper 7d: `config/paper_7d.yml`
+- Live: `config/live.yml`
 
-## Se o bot pausar sozinho
-1. Rode `python bot.py --config config/config.yml --status`
-2. Rode `python scripts/healthcheck.py --config config/config.yml --strict`
-3. Verifique:
-   - `consecutive_error_count`
-   - `live_reconcile_required`
-   - `active_dispatch_locks`
-4. Consulte `data/logs/bot.jsonl`
-5. Se houve mismatch, reconcilie posição/ordens antes de voltar a live
+## Comandos
 
-## Se houver lock de ordem em voo
-- não force nova ordem antes de verificar a exchange
-- rode o bot em `--status`
-- se necessário, suba em live para recuperar via `clientOrderId`
-- confirme depois que `active_dispatch_locks` voltou para zero
+### Migrar banco paper
+```bash
+python scripts/migrate_db.py --config config/config.yml
+```
 
-## Se o dashboard abrir mas o mercado estiver velho
-- execute `python scripts/backfill_market_cache.py --config config/config.yml`
-- recarregue a tela
-- verifique a pasta `data/dashboard_cache`
+### Migrar banco live
+```bash
+python scripts/migrate_db.py --config config/live.yml
+```
 
-## Rotina diária
-- healthcheck
-- conferir eventos críticos
-- conferir NTFY
-- conferir lucro do dia e ciclos fechados
-- revisar logs do `bot.jsonl`
+### Healthcheck paper
+```bash
+python scripts/healthcheck.py --config config/config.yml --strict
+```
 
-## Recuperação após restart
-- o bot faz `startup_reconcile`
-- se detectar mismatch, pausa
-- trate o mismatch primeiro, depois despause
+### Healthcheck live
+```bash
+python scripts/healthcheck.py --config config/live.yml --strict
+```
 
-## Saída segura
-- pare o bot com Ctrl+C
-- aguarde o último ciclo de log
-- não desligue a máquina durante ordem em voo
+### Executar paper
+```bash
+python bot.py --config config/config.yml
+```
+
+### Executar live
+```bash
+python bot.py --config config/live.yml
+```
+
+## Guard-rails
+
+- Banco com identidade divergente bloqueia bootstrap.
+- Reconcile live pausa o runtime em divergência material.
+- Recovery de dispatch lock reaplica estado econômico do fill.
+- Trades agora carregam identidade operacional (`bot_order_id`, `client_order_id`, `exchange_order_id`, `run_id`, `source`).

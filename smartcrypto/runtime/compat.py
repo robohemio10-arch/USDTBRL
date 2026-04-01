@@ -60,20 +60,18 @@ from smartcrypto.execution.trading import (
     record_simulated_execution as execution_record_simulated_execution,
 )
 from smartcrypto.runtime.tick_cycle import tick as runtime_tick
-from smartcrypto.execution.reconcile import (
-    bot_managed_open_order_refs as execution_bot_managed_open_order_refs,
-    is_bot_managed_exchange_order as execution_is_bot_managed_exchange_order,
-    live_reconcile_allow_extra_base_asset_balance as execution_live_reconcile_allow_extra_base_asset_balance,
-    live_reconcile_pause_on_mismatch as execution_live_reconcile_pause_on_mismatch,
-    live_reconcile_qty_tolerance as execution_live_reconcile_qty_tolerance,
-    map_exchange_order_state as execution_map_exchange_order_state,
-    reconcile_live_exchange_state as execution_reconcile_live_exchange_state,
-)
-from smartcrypto.execution.recovery import (
-    active_dispatch_lock_present as execution_active_dispatch_lock_present,
-    inflight_order_lock_seconds as execution_inflight_order_lock_seconds,
-    mark_dispatch_unknown as execution_mark_dispatch_unknown,
-    recover_dispatch_locks as execution_recover_dispatch_locks,
+from smartcrypto.runtime.reconcile_ops import (
+    active_dispatch_lock_present as runtime_active_dispatch_lock_present,
+    bot_managed_open_order_refs as runtime_bot_managed_open_order_refs,
+    inflight_order_lock_seconds as runtime_inflight_order_lock_seconds,
+    is_bot_managed_exchange_order as runtime_is_bot_managed_exchange_order,
+    live_reconcile_allow_extra_base_asset_balance as runtime_live_reconcile_allow_extra_base_asset_balance,
+    live_reconcile_pause_on_mismatch as runtime_live_reconcile_pause_on_mismatch,
+    live_reconcile_qty_tolerance as runtime_live_reconcile_qty_tolerance,
+    map_exchange_order_state as runtime_map_exchange_order_state,
+    mark_dispatch_unknown as runtime_mark_dispatch_unknown,
+    reconcile_live_exchange_state as runtime_reconcile_live_exchange_state,
+    recover_dispatch_locks as runtime_recover_dispatch_locks,
 )
 from smartcrypto.infra.binance_adapter import ExchangeAdapter
 from smartcrypto.runtime.cache import (
@@ -321,7 +319,7 @@ def client_order_id_prefix(bot_order_id: str) -> str:
 
 
 def inflight_order_lock_seconds(cfg: dict[str, Any]) -> int:
-    return execution_inflight_order_lock_seconds(cfg)
+    return runtime_inflight_order_lock_seconds(cfg)
 
 def circuit_breaker_max_errors(cfg: dict[str, Any]) -> int:
     return max(1, int(cfg.get("runtime", {}).get("circuit_breaker_max_errors", 5) or 5))
@@ -332,18 +330,18 @@ def circuit_breaker_cooldown_seconds(cfg: dict[str, Any]) -> int:
 
 
 def live_reconcile_pause_on_mismatch(cfg: dict[str, Any]) -> bool:
-    return execution_live_reconcile_pause_on_mismatch(cfg)
+    return runtime_live_reconcile_pause_on_mismatch(cfg)
 
 def live_reconcile_qty_tolerance(
     cfg: dict[str, Any], exchange: ExchangeAdapter | None = None
 ) -> float:
-    return execution_live_reconcile_qty_tolerance(cfg, exchange)
+    return runtime_live_reconcile_qty_tolerance(cfg, exchange)
 
 def live_reconcile_allow_extra_base_asset_balance(cfg: dict[str, Any]) -> bool:
-    return execution_live_reconcile_allow_extra_base_asset_balance(cfg)
+    return runtime_live_reconcile_allow_extra_base_asset_balance(cfg)
 
 def bot_managed_open_order_refs(store: StateStore, limit: int = 500) -> tuple[set[str], set[str]]:
-    return execution_bot_managed_open_order_refs(store, limit=limit)
+    return runtime_bot_managed_open_order_refs(store, limit=limit)
 
 def is_bot_managed_exchange_order(
     order: dict[str, Any],
@@ -351,7 +349,7 @@ def is_bot_managed_exchange_order(
     known_exchange_ids: set[str],
     known_client_ids: set[str],
 ) -> bool:
-    return execution_is_bot_managed_exchange_order(
+    return runtime_is_bot_managed_exchange_order(
         order,
         known_exchange_ids=known_exchange_ids,
         known_client_ids=known_client_ids,
@@ -370,7 +368,7 @@ def mark_dispatch_unknown(
     client_prefix: str,
     error: Exception,
 ) -> None:
-    execution_mark_dispatch_unknown(
+    runtime_mark_dispatch_unknown(
         store,
         bot_order_id=bot_order_id,
         side=side,
@@ -383,21 +381,18 @@ def mark_dispatch_unknown(
         error=error,
     )
 
-def recover_dispatch_locks(
-    cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter
-) -> None:
-    execution_recover_dispatch_locks(cfg, store, exchange)
+recover_dispatch_locks = runtime_recover_dispatch_locks
 
 def active_dispatch_lock_present(cfg: dict[str, Any], store: StateStore) -> bool:
-    return execution_active_dispatch_lock_present(cfg, store)
+    return runtime_active_dispatch_lock_present(cfg, store)
 
 def reconcile_live_exchange_state(
     cfg: dict[str, Any], store: StateStore, exchange: ExchangeAdapter, *, last_price: float
 ) -> None:
-    execution_reconcile_live_exchange_state(cfg, store, exchange, last_price=last_price)
+    runtime_reconcile_live_exchange_state(cfg, store, exchange, last_price=last_price)
 
 def map_exchange_order_state(snapshot: dict[str, Any] | None) -> str:
-    return execution_map_exchange_order_state(snapshot)
+    return runtime_map_exchange_order_state(snapshot)
 
 def record_execution_report(
     *,

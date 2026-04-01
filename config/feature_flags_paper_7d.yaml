@@ -1,0 +1,16 @@
+runtime:
+  modular_runtime_enabled: false
+  scheduler_enabled: false
+  lifecycle_enabled: false
+dashboard:
+  modular_dashboard_enabled: false
+research:
+  shadow_mode_enabled: true
+  paper_decision_enabled: true
+  live_partial_enabled: false
+
+paper:
+  official_profile_enabled: true
+
+runtime:
+  operational_alerts_enabled: true

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from smartcrypto.domain.strategy import compute_exit_targets
 from smartcrypto.execution.controls import (
     choose_exit_order_type,
     clear_reentry_price_block,
@@ -9,13 +10,12 @@ from smartcrypto.execution.controls import (
     is_live_mode,
     post_sell_controls,
 )
+from smartcrypto.execution.order_identity import client_order_id_prefix, new_bot_order_id
+from smartcrypto.execution.reconcile import live_reconcile_qty_tolerance, map_exchange_order_state
+from smartcrypto.execution.recovery import mark_dispatch_unknown
 from smartcrypto.infra.binance_adapter import ExchangeAdapter
+from smartcrypto.runtime.notifications import send_sell_notification
 from smartcrypto.state.store import PositionState, StateStore, utc_now
-
-
-def _legacy() -> Any:
-    from smartcrypto.runtime import bot_runtime as legacy
-    return legacy
 
 
 def record_execution_report(
@@ -29,7 +29,6 @@ def record_execution_report(
     requested_brl_value: float | None = None,
     report: dict[str, Any] | None = None,
 ) -> None:
-    legacy = _legacy()
     if not report:
         return
     attempts = list(report.get("attempts") or [])
@@ -75,7 +74,7 @@ def record_execution_report(
             event_time=submitted_time,
         )
 
-        submitted_state = legacy.map_exchange_order_state(submitted)
+        submitted_state = map_exchange_order_state(submitted)
         if submitted_state not in {"unknown", "submitted"}:
             store.add_order_event(
                 bot_order_id=bot_order_id,
@@ -95,7 +94,7 @@ def record_execution_report(
                 event_time=submitted_time,
             )
 
-        latest_state = legacy.map_exchange_order_state(latest)
+        latest_state = map_exchange_order_state(latest)
         latest_time = latest.get("updated_at") or submitted_time
         if latest_state != submitted_state or latest_executed > float(
             submitted.get("executed_qty_usdt") or 0.0
@@ -164,6 +163,7 @@ def record_simulated_execution(
 
 
 
+
 def execute_buy(
     *,
     store: StateStore,
@@ -176,13 +176,16 @@ def execute_buy(
     cfg: dict[str, Any],
     params: dict[str, Any],
 ) -> PositionState:
-    legacy = _legacy()
     fee_rate = float(cfg["execution"].get("fee_rate", 0.001))
-    order_type = legacy.order_type_for("buy", cfg)
+    order_type = (
+        "market"
+        if str(cfg.get("execution", {}).get("entry_order_type", "limit")).lower() == "market"
+        else "limit"
+    )
     fallback_market = entry_fallback_market_enabled(cfg)
-    bot_order_id = legacy.new_bot_order_id("buy", reason)
+    bot_order_id = new_bot_order_id("buy", reason)
     requested_price = None if order_type == "market" else float(price_brl)
-    client_prefix = legacy.client_order_id_prefix(bot_order_id)
+    client_prefix = client_order_id_prefix(bot_order_id)
     store.add_order_event(
         bot_order_id=bot_order_id,
         side="buy",
@@ -202,13 +205,11 @@ def execute_buy(
             side="buy",
             reason=reason,
             order_type=order_type,
-            client_order_id=(
-                f"{client_prefix}-L1" if order_type == "limit" else f"{client_prefix}-M1"
-            ),
+            client_order_id=f"{client_prefix}-L1" if order_type == "limit" else f"{client_prefix}-M1",
             status="pending_submit",
             requested_price_brl=requested_price,
             requested_brl_value=float(brl_value),
-            details={"client_order_id_prefix": client_prefix},
+            details={"client_order_id_prefix": client_prefix, "regime": regime},
         )
         try:
             fill = exchange.execute_entry(
@@ -221,10 +222,10 @@ def execute_buy(
             store.update_dispatch_lock(
                 bot_order_id,
                 status="submitted",
-                details={"execution_report": dict(fill.get("execution_report") or {})},
+                details={"execution_report": dict(fill.get("execution_report") or {}), "regime": regime},
             )
         except Exception as exc:
-            legacy.mark_dispatch_unknown(
+            mark_dispatch_unknown(
                 store,
                 bot_order_id=bot_order_id,
                 side="buy",
@@ -251,11 +252,25 @@ def execute_buy(
         exec_price = float(fill["price_brl"])
         if exec_qty <= 0 or exec_quote <= 0 or exec_price <= 0:
             raise RuntimeError(f"Compra live sem execução válida: {fill}")
-        store.clear_dispatch_lock(bot_order_id, terminal_status="terminal")
+        exchange_order_id = (
+            str((fill.get("execution_report") or {}).get("exchange_order_id") or "") or None
+        )
+        client_order_id = (
+            str((fill.get("execution_report") or {}).get("client_order_id") or "") or None
+        )
+        if not client_order_id:
+            attempts = list((fill.get("execution_report") or {}).get("attempts") or [])
+            if attempts:
+                latest = dict(attempts[-1].get("latest") or {})
+                submitted = dict(attempts[-1].get("submitted") or {})
+                client_order_id = str(latest.get("client_order_id") or submitted.get("client_order_id") or "") or None
+                exchange_order_id = str(latest.get("order_id") or submitted.get("order_id") or exchange_order_id or "") or None
     else:
         exec_price = float(price_brl)
         exec_quote = float(brl_value)
         exec_qty = exec_quote / max(exec_price, 1e-9)
+        exchange_order_id = None
+        client_order_id = None
         record_simulated_execution(
             store=store,
             bot_order_id=bot_order_id,
@@ -266,60 +281,34 @@ def execute_buy(
             qty_usdt=exec_qty,
             brl_value=exec_quote,
         )
+
     fee = exec_quote * fee_rate
     total_cost = exec_quote + fee
     new_qty = position.qty_usdt + exec_qty
     new_spent = position.brl_spent + total_cost
     avg = new_spent / max(new_qty, 1e-9)
-    tp_price, stop_price = legacy.compute_exit_targets(
+    tp_price, stop_price = compute_exit_targets(
         qty_usdt=new_qty, brl_spent=new_spent, avg_price_brl=avg, params=params, cfg=cfg
     )
-    safety_count = position.safety_count + (1 if position.status == "open" else 0)
-    store.add_trade(
-        side="buy",
-        price_brl=exec_price,
-        qty_usdt=exec_qty,
-        brl_value=exec_quote,
-        fee_brl=fee,
+    updated = store.apply_buy_fill(
+        bot_order_id=bot_order_id,
         reason=reason,
-        mode=str(cfg["execution"]["mode"]),
         regime=regime,
-    )
-    if position.status == "flat":
-        store.open_cycle(
-            regime=regime, entry_price_brl=exec_price, qty_usdt=new_qty, brl_spent=new_spent
-        )
-    else:
-        store.sync_open_cycle(qty_usdt=new_qty, brl_spent=new_spent, safety_count=safety_count)
-    updated = store.update_position(
-        status="open",
-        qty_usdt=new_qty,
-        brl_spent=new_spent,
-        avg_price_brl=avg,
+        mode=str(cfg["execution"]["mode"]),
+        fee_rate=fee_rate,
+        exec_price_brl=exec_price,
+        exec_qty_usdt=exec_qty,
+        exec_quote_brl=exec_quote,
         tp_price_brl=tp_price,
         stop_price_brl=stop_price,
-        safety_count=safety_count,
-        regime=regime,
-        trailing_active=0,
-        trailing_anchor_brl=0.0,
-        unrealized_pnl_brl=(new_qty * exec_price) - new_spent,
+        order_type=order_type,
+        source="exchange" if is_live_mode(cfg) else "simulated",
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        run_id=str(cfg.get("__run_id", "") or ""),
     )
     clear_reentry_price_block(store)
-    store.add_event(
-        "INFO",
-        "buy_executed",
-        {
-            "reason": reason,
-            "price_brl": exec_price,
-            "brl_value": exec_quote,
-            "qty_usdt": exec_qty,
-            "order_type": order_type,
-            "bot_order_id": bot_order_id,
-        },
-    )
     return updated
-
-
 
 
 def execute_sell(
@@ -333,13 +322,12 @@ def execute_sell(
     cfg: dict[str, Any],
     params: dict[str, Any],
 ) -> PositionState:
-    legacy = _legacy()
     fee_rate = float(cfg["execution"].get("fee_rate", 0.001))
     order_type = choose_exit_order_type(reason, cfg, params)
     fallback_market = False
-    bot_order_id = legacy.new_bot_order_id("sell", reason)
+    bot_order_id = new_bot_order_id("sell", reason)
     requested_price = None if order_type == "market" else float(price_brl)
-    client_prefix = legacy.client_order_id_prefix(bot_order_id)
+    client_prefix = client_order_id_prefix(bot_order_id)
     store.add_order_event(
         bot_order_id=bot_order_id,
         side="sell",
@@ -359,24 +347,18 @@ def execute_sell(
             side="sell",
             reason=reason,
             order_type=order_type,
-            client_order_id=(
-                f"{client_prefix}-L1" if order_type == "limit" else f"{client_prefix}-M1"
-            ),
+            client_order_id=f"{client_prefix}-L1" if order_type == "limit" else f"{client_prefix}-M1",
             status="pending_submit",
             requested_price_brl=requested_price,
             requested_qty_usdt=float(position.qty_usdt),
             requested_brl_value=float(position.qty_usdt * (requested_price or price_brl)),
-            details={"client_order_id_prefix": client_prefix},
+            details={"client_order_id_prefix": client_prefix, "regime": regime},
         )
         if order_type == "limit" and reason in {"take_profit", "trailing_exit"}:
             store.add_event(
                 "INFO",
                 "profit_exit_limit_only",
-                {
-                    "reason": reason,
-                    "price_brl": float(price_brl),
-                    "qty_usdt": float(position.qty_usdt),
-                },
+                {"reason": reason, "price_brl": float(price_brl), "qty_usdt": float(position.qty_usdt)},
             )
         try:
             fill = exchange.execute_exit(
@@ -389,10 +371,10 @@ def execute_sell(
             store.update_dispatch_lock(
                 bot_order_id,
                 status="submitted",
-                details={"execution_report": dict(fill.get("execution_report") or {})},
+                details={"execution_report": dict(fill.get("execution_report") or {}), "regime": regime},
             )
         except Exception as exc:
-            legacy.mark_dispatch_unknown(
+            mark_dispatch_unknown(
                 store,
                 bot_order_id=bot_order_id,
                 side="sell",
@@ -420,11 +402,25 @@ def execute_sell(
         exec_price = float(fill["price_brl"])
         if exec_qty <= 0 or gross <= 0 or exec_price <= 0:
             raise RuntimeError(f"Venda live sem execução válida: {fill}")
-        store.clear_dispatch_lock(bot_order_id, terminal_status="terminal")
+        exchange_order_id = (
+            str((fill.get("execution_report") or {}).get("exchange_order_id") or "") or None
+        )
+        client_order_id = (
+            str((fill.get("execution_report") or {}).get("client_order_id") or "") or None
+        )
+        if not client_order_id:
+            attempts = list((fill.get("execution_report") or {}).get("attempts") or [])
+            if attempts:
+                latest = dict(attempts[-1].get("latest") or {})
+                submitted = dict(attempts[-1].get("submitted") or {})
+                client_order_id = str(latest.get("client_order_id") or submitted.get("client_order_id") or "") or None
+                exchange_order_id = str(latest.get("order_id") or submitted.get("order_id") or exchange_order_id or "") or None
     else:
         exec_qty = float(position.qty_usdt)
         exec_price = float(price_brl)
         gross = exec_qty * exec_price
+        exchange_order_id = None
+        client_order_id = None
         record_simulated_execution(
             store=store,
             bot_order_id=bot_order_id,
@@ -435,46 +431,34 @@ def execute_sell(
             qty_usdt=exec_qty,
             brl_value=gross,
         )
-    fee = gross * fee_rate
-    net_received = gross - fee
+
+    net_received = gross - (gross * fee_rate)
     target_qty = float(position.qty_usdt)
     fill_ratio = min(1.0, exec_qty / max(target_qty, 1e-9))
     sold_cost_basis = float(position.brl_spent) * fill_ratio
     pnl_brl = net_received - sold_cost_basis
     pnl_pct = (pnl_brl / sold_cost_basis) * 100.0 if sold_cost_basis else 0.0
-    realized = position.realized_pnl_brl + pnl_brl
-    store.add_trade(
-        side="sell",
-        price_brl=exec_price,
-        qty_usdt=exec_qty,
-        brl_value=gross,
-        fee_brl=fee,
-        reason=reason,
-        mode=str(cfg["execution"]["mode"]),
-        regime=regime,
-    )
+
     remaining_qty = max(0.0, target_qty - exec_qty)
     remaining_spent = max(0.0, float(position.brl_spent) - sold_cost_basis)
     if remaining_qty <= live_reconcile_qty_tolerance(cfg):
-        store.close_latest_cycle(
-            exit_price_brl=exec_price,
-            brl_received=net_received,
-            pnl_brl=pnl_brl,
-            pnl_pct=pnl_pct,
-            safety_count=position.safety_count,
-            exit_reason=reason,
-        )
-        store.add_event(
-            "INFO",
-            "sell_executed",
-            {
-                "reason": reason,
-                "price_brl": exec_price,
-                "pnl_brl": pnl_brl,
-                "qty_usdt": exec_qty,
-                "order_type": order_type,
-                "bot_order_id": bot_order_id,
-            },
+        updated = store.apply_sell_fill(
+            bot_order_id=bot_order_id,
+            reason=reason,
+            regime=regime,
+            mode=str(cfg["execution"]["mode"]),
+            fee_rate=fee_rate,
+            exec_price_brl=exec_price,
+            exec_qty_usdt=exec_qty,
+            exec_quote_brl=gross,
+            qty_tolerance_usdt=live_reconcile_qty_tolerance(cfg),
+            tp_price_brl=0.0,
+            stop_price_brl=0.0,
+            order_type=order_type,
+            source="exchange" if is_live_mode(cfg) else "simulated",
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            run_id=str(cfg.get("__run_id", "") or ""),
         )
         send_sell_notification(
             store=store,
@@ -486,48 +470,32 @@ def execute_sell(
             pnl_pct=pnl_pct,
             order_type=order_type,
         )
-        updated = store.reset_position(realized_pnl_brl=realized)
         post_sell_controls(store, cfg, params, reason, exec_price)
         return updated
+
     remaining_avg = remaining_spent / max(remaining_qty, 1e-9)
-    tp_price, stop_price = legacy.compute_exit_targets(
+    tp_price, stop_price = compute_exit_targets(
         qty_usdt=remaining_qty,
         brl_spent=remaining_spent,
         avg_price_brl=remaining_avg,
         params=params,
         cfg=cfg,
     )
-    store.sync_open_cycle(
-        qty_usdt=remaining_qty, brl_spent=remaining_spent, safety_count=position.safety_count
-    )
-    updated = store.update_position(
-        status="open",
-        qty_usdt=remaining_qty,
-        brl_spent=remaining_spent,
-        avg_price_brl=remaining_avg,
+    return store.apply_sell_fill(
+        bot_order_id=bot_order_id,
+        reason=reason,
+        regime=regime,
+        mode=str(cfg["execution"]["mode"]),
+        fee_rate=fee_rate,
+        exec_price_brl=exec_price,
+        exec_qty_usdt=exec_qty,
+        exec_quote_brl=gross,
+        qty_tolerance_usdt=live_reconcile_qty_tolerance(cfg),
         tp_price_brl=tp_price,
         stop_price_brl=stop_price,
-        safety_count=position.safety_count,
-        regime=regime,
-        trailing_active=position.trailing_active,
-        trailing_anchor_brl=position.trailing_anchor_brl,
-        realized_pnl_brl=realized,
-        unrealized_pnl_brl=(remaining_qty * exec_price) - remaining_spent,
+        order_type=order_type,
+        source="exchange" if is_live_mode(cfg) else "simulated",
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        run_id=str(cfg.get("__run_id", "") or ""),
     )
-    store.add_event(
-        "WARN",
-        "sell_partially_executed",
-        {
-            "reason": reason,
-            "price_brl": exec_price,
-            "qty_executed_usdt": exec_qty,
-            "qty_remaining_usdt": remaining_qty,
-            "pnl_brl": pnl_brl,
-            "order_type": order_type,
-            "bot_order_id": bot_order_id,
-        },
-    )
-    return updated
-
-
-

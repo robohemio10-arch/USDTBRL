@@ -10,9 +10,10 @@ PAGE_OPTIONS = [
     "NTFY",
     "Proteção",
     "DB",
+    "IA & Rollout",
 ]
 
-AUTO_REFRESH_PAGES = {"Resumo", "Mercado", "Operações", "Proteção", "DB"}
+AUTO_REFRESH_PAGES = {"Resumo", "Mercado", "Proteção", "DB"}
 
 
 def ensure_session_defaults() -> None:

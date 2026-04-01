@@ -128,9 +128,11 @@ class PhaseBHardeningTests(unittest.TestCase):
     def test_reconcile_flags_mismatch_when_exchange_has_position_and_local_flat(self):
         self.exchange.balance_total = 10.0
         reconcile_live_exchange_state(self.cfg, self.store, self.exchange, last_price=5.2)
-        self.assertFalse(self.store.get_flag("live_reconcile_required", False))
-        self.assertFalse(self.store.get_flag("paused", False))
-        self.assertTrue(self.store.read_df("reconciliation_audit", 5).empty)
+        self.assertTrue(self.store.get_flag("live_reconcile_required", False))
+        self.assertTrue(self.store.get_flag("paused", False))
+        audit = self.store.read_df("reconciliation_audit", 5)
+        self.assertFalse(audit.empty)
+        self.assertEqual(str(audit.iloc[0]["action"]), "mismatch")
 
     def test_recover_dispatch_lock_marks_terminal_when_exchange_order_exists(self):
         self.store.upsert_dispatch_lock(
@@ -160,6 +162,10 @@ class PhaseBHardeningTests(unittest.TestCase):
         lock = self.store.get_dispatch_lock("BOT-1")
         self.assertEqual(lock["status"], "terminal")
         self.assertTrue((self.store.read_df("order_events", 20)["bot_order_id"] == "BOT-1").any())
+        self.assertEqual(self.store.get_position().status, "open")
+        trades = self.store.read_df("trades", 20)
+        self.assertFalse(trades.empty)
+        self.assertEqual(str(trades.iloc[0]["bot_order_id"]), "BOT-1")
 
     def test_execute_buy_live_clears_dispatch_lock_and_updates_position(self):
         position = self.store.get_position()

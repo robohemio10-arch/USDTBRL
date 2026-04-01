@@ -1,4 +1,5 @@
 def test_dashboard_module_imports() -> None:
+    _install_streamlit_stubs()
     import smartcrypto.app.components.candlestick
     import smartcrypto.app.components.metrics_row
     import smartcrypto.app.components.order_table
@@ -7,6 +8,7 @@ def test_dashboard_module_imports() -> None:
     import smartcrypto.app.components.trade_pins
     import smartcrypto.app.pages.banco_dados
     import smartcrypto.app.pages.configuracao
+    import smartcrypto.app.pages.ia_rollout
     import smartcrypto.app.pages.mercado
     import smartcrypto.app.pages.notificacoes
     import smartcrypto.app.pages.operacoes
@@ -48,6 +50,7 @@ def _install_streamlit_stubs() -> None:
     st.success = lambda *args, **kwargs: None
     st.warning = lambda *args, **kwargs: None
     st.error = lambda *args, **kwargs: None
+    st.title = lambda *args, **kwargs: None
     st.columns = lambda n, **kwargs: [types.SimpleNamespace(metric=lambda *a, **k: None, button=lambda *a, **k: False) for _ in range(n)]
     st.button = lambda *args, **kwargs: False
     st.dataframe = lambda *args, **kwargs: None
@@ -89,3 +92,15 @@ def test_dashboard_runtime_status_fallback_uses_portfolio_view(tmp_path) -> None
     assert status["portfolio"]["cash_brl"] == 52.5
     assert status["portfolio"]["equity_brl"] == 52.5
     assert status["position"]["qty_usdt"] == 10.0
+
+
+def test_dashboard_navigation_and_operational_status_helpers() -> None:
+    _install_streamlit_stubs()
+    sys.modules.pop("smartcrypto.app.dashboard_app", None)
+    module = importlib.import_module("smartcrypto.app.dashboard_app")
+
+    assert "IA & Rollout" in module.app_session.PAGE_OPTIONS
+    assert callable(module.load_operational_status)
+    assert callable(module.render_operational_status_block)
+    status = module.load_operational_status({"execution": {"mode": "paper"}, "storage": {"db_path": ":memory:"}})
+    assert isinstance(status, dict)
