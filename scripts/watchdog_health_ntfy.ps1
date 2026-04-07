@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = "E:\USDTBRL"
 $ConfigPath = "config/config.yml"
-$PythonExe = "python"
+$PythonExe = "E:\USDTBRL\.venv\Scripts\python.exe"
 
 Set-Location $ProjectRoot
 
