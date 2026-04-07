@@ -6,8 +6,8 @@ from typing import Any
 OFFICIAL_PAPER_PROFILE_ID = "paper_7d"
 OFFICIAL_PAPER_PROFILE_VERSION = "2026.03.26"
 OFFICIAL_PAPER_PROTOCOL_VERSION = "paper-v1"
-OFFICIAL_PAPER_CONFIG_NAME = "paper_7d.yml"
-OFFICIAL_PAPER_FLAGS_NAME = "feature_flags_paper_7d.yaml"
+OFFICIAL_PAPER_CONFIG_NAME = "config.yml"
+OFFICIAL_PAPER_FLAGS_NAME = "feature_flags.yaml"
 
 
 def is_official_paper_profile(
@@ -96,3 +96,4 @@ def validate_paper_profile(
         "errors": errors,
         "warnings": warnings,
     }
+

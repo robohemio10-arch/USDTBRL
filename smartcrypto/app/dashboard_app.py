@@ -138,7 +138,7 @@ def dashboard_warnings(cfg: dict[str, Any], operational_status: dict[str, Any] |
 
     if mode == "live":
         warnings.append("Dashboard carregado com perfil LIVE. Use-o apenas para observação e diagnóstico.")
-    if config_name in {"live.yml", "config.live.yml"}:
+    if config_name in {"live_100usdt.yml", "live.yml", "config.live.yml"}:
         warnings.append("O dashboard está usando um arquivo de configuração live.")
     if str(preflight.get("status", "")).lower() not in {"", "ok"}:
         warnings.append(f"Pré-flight reporta {str(preflight.get('status', 'unknown')).upper()}.")
@@ -1537,3 +1537,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

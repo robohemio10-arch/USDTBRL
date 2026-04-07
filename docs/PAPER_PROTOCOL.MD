@@ -8,8 +8,8 @@
 
 ## Startup checklist
 
-- Confirmar `config/paper_7d.yml`
-- Confirmar `config/feature_flags_paper_7d.yaml`
+- Confirmar `config/config.yml`
+- Confirmar `config/feature_flags.yaml`
 - Confirmar `runtime.profile_frozen=true`
 - Confirmar `runtime.experiment_profile=paper_7d`
 - Confirmar `runtime.protocol_version=paper-v1`
@@ -52,3 +52,4 @@
 - qualquer instância duplicada
 - sessões sem `run_id`
 - ausência de artefatos diários
+

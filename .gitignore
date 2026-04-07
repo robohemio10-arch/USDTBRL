@@ -1,85 +1,56 @@
-# =========================
-# Python bytecode / cache
-# =========================
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
+*.so
 
-# =========================
-# Virtualenvs
-# =========================
+# Virtual environments
 .venv/
 venv/
 env/
-ENV/
 
-# =========================
-# Tool caches
-# =========================
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-htmlcov/
-.cache/
-
-# =========================
-# Build / packaging
-# =========================
-build/
-dist/
+# Packaging
 *.egg-info/
-.eggs/
-pip-wheel-metadata/
+dist/
+build/
 
-# =========================
-# IDE / editor
-# =========================
-.vscode/
-.idea/
-*.swp
-*.swo
+# Testing
+.pytest_cache/
+.coverage
 
-# =========================
-# OS files
-# =========================
-.DS_Store
-Thumbs.db
-desktop.ini
+# Linting / typing
+.mypy_cache/
+.ruff_cache/
 
-# =========================
-# Secrets / local config
-# =========================
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# =========================
-# Trading runtime artifacts
-# =========================
-_memory_/
+# Logs
+*.log
 data/logs/
-data/runtime/
-data/exports/
+data/logs/*.jsonl
+
+# Dashboard cache
 data/dashboard_cache/
 
-# Databases and local state
-*.sqlite
-*.sqlite3
-*.db
-state.sqlite
-state_backup.sqlite
-state.paper_30d.squlite
+# Databases (keep only canonical if needed)
+data/*.sqlite-journal
+data/*_old.sqlite
+data/bkp*.sqlite
 
-# Archives / dumps
-*.zip
-*.tar
-*.gz
+# Optional: ignore all DBs (uncomment if desired)
+# data/*.sqlite
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+Documentos/
+USDTBRL.zip
+data/*.sqlite
+data/backups/
+data/backup/
+data/logs/
+data/runtime/
+data/dashboard_cache/
 *.bak
-*.patch
-
-# Local notes (if desired)
-# *_NOTES.md

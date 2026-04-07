@@ -249,6 +249,16 @@ class StateStore:
     def list_active_dispatch_locks(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self.dispatch_locks.list_active(limit=limit)
 
+    def get_reserved_balances(self) -> dict[str, float]:
+        reserved = {"BRL": 0.0, "USDT": 0.0}
+        for lock in self.list_active_dispatch_locks():
+            side = str(lock.get("side") or "").strip().lower()
+            if side == "buy":
+                reserved["BRL"] += float(lock.get("requested_brl_value") or 0.0)
+            elif side == "sell":
+                reserved["USDT"] += float(lock.get("requested_qty_usdt") or 0.0)
+        return reserved
+
     def clear_dispatch_lock(self, bot_order_id: str, *, terminal_status: str = "terminal") -> None:
         self.dispatch_locks.clear(bot_order_id, terminal_status=terminal_status)
 

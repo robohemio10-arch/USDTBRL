@@ -14,7 +14,7 @@ def _normalized_mode(cfg: dict[str, Any]) -> str:
 def _config_is_live_profile(ui: Any) -> bool:
     try:
         path = Path(str(ui.config_path()))
-        return path.name.lower() in {"live.yml", "config.live.yml"}
+        return path.name.lower() in {"live_100usdt.yml", "live.yml", "config.live.yml"}
     except Exception:
         return False
 
@@ -30,6 +30,7 @@ def _config_is_editable(cfg: dict[str, Any], ui: Any) -> bool:
     return True
 
 
+
 def render(cfg: dict[str, Any], ui: Any) -> None:
     import pandas as pd
     import streamlit as st
@@ -40,12 +41,32 @@ def render(cfg: dict[str, Any], ui: Any) -> None:
     cfg_file = Path(str(ui.config_path())).name
 
     if editable:
-        st.caption(f"Perfil carregado: {cfg_file}. Esta aba salva alterações apenas no perfil atual.")
+        st.caption(
+            f"Perfil carregado: {cfg_file}. Esta aba salva alterações apenas no perfil atual. "
+            "Reinicie o bot para aplicar parâmetros de estratégia já em execução."
+        )
     else:
         st.warning(
             "Este painel está em modo somente leitura para perfil live. "
             "Use o dashboard em paper para editar parâmetros e promova para live via arquivo/versionamento."
         )
+
+    raw_ramps = cfg.get("strategy", {}).get("ramps", []) or []
+    ramps_df = pd.DataFrame(raw_ramps)
+    if ramps_df.empty:
+        ramps_df = pd.DataFrame(
+            [
+                {"step_index": 1, "drop_pct": 0.35, "multiplier": 1.0},
+                {"step_index": 2, "drop_pct": 0.70, "multiplier": 1.25},
+            ]
+        )
+    if "step_index" not in ramps_df.columns:
+        ramps_df["step_index"] = list(range(1, len(ramps_df) + 1))
+    if "drop_pct" not in ramps_df.columns:
+        ramps_df["drop_pct"] = 0.0
+    if "multiplier" not in ramps_df.columns:
+        ramps_df["multiplier"] = 1.0
+    ramps_df = ramps_df[["step_index", "drop_pct", "multiplier"]].copy()
 
     with st.form("config_form"):
         c1, c2, c3 = st.columns(3)
@@ -92,7 +113,7 @@ def render(cfg: dict[str, Any], ui: Any) -> None:
             disabled=not editable,
         )
 
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3, s4, s5 = st.columns(5)
         first_buy = s1.number_input(
             "Primeira compra BRL",
             min_value=0.0,
@@ -122,6 +143,14 @@ def render(cfg: dict[str, Any], ui: Any) -> None:
             step=0.01,
             format="%.4f",
             disabled=not editable,
+        )
+        max_active_ramps = s5.number_input(
+            "Ramps ativas",
+            min_value=0,
+            value=ui.safe_int(cfg.get("strategy", {}).get("max_active_ramps", 0)),
+            step=1,
+            disabled=not editable,
+            help="0 = usa todas as ramps que couberem no ciclo. Qualquer valor > 0 limita exatamente quantas ramps podem ficar ativas no ciclo.",
         )
 
         t1, t2, t3, t4 = st.columns(4)
@@ -181,34 +210,94 @@ def render(cfg: dict[str, Any], ui: Any) -> None:
             disabled=not editable,
         )
 
+        st.markdown("#### Ramps")
+        st.caption(
+            "Você controla aqui o gatilho (%) e o tamanho (multiplier) de cada rampa. "
+            "O campo 'Ramps ativas' acima define quantas delas o bot pode usar por ciclo."
+        )
+        ramps_editor = st.data_editor(
+            ramps_df,
+            hide_index=True,
+            num_rows="dynamic" if editable else "fixed",
+            disabled=not editable,
+            width="stretch",
+            column_config={
+                "step_index": st.column_config.NumberColumn("Rampa", min_value=1, step=1, format="%d"),
+                "drop_pct": st.column_config.NumberColumn("Queda %", min_value=0.0001, step=0.01, format="%.4f"),
+                "multiplier": st.column_config.NumberColumn("Multiplicador", min_value=0.0001, step=0.05, format="%.4f"),
+            },
+        )
+
         submit = st.form_submit_button("Salvar configuração", width="stretch", disabled=not editable)
         if submit:
-            cfg["execution"]["mode"] = mode
-            cfg["execution"]["allow_live"] = bool(mode == "live")
-            cfg["market"]["symbol"] = symbol
-            cfg["market"]["timeframe"] = timeframe
-            cfg["portfolio"]["initial_cash_brl"] = float(initial_cash)
-            cfg["risk"]["max_open_brl"] = float(max_open)
-            cfg["risk"]["max_daily_loss_brl"] = float(max_daily_loss)
-            cfg["strategy"]["first_buy_brl"] = float(first_buy)
-            cfg["strategy"]["max_cycle_brl"] = float(max_cycle)
-            cfg["strategy"]["take_profit_pct"] = float(take_profit)
-            cfg["strategy"]["min_profit_brl"] = float(min_profit)
-            cfg["strategy"]["trailing_enabled"] = bool(trailing_enabled)
-            cfg["strategy"]["trailing_activation_pct"] = float(trailing_activation)
-            cfg["strategy"]["trailing_callback_pct"] = float(trailing_callback)
-            cfg["strategy"]["stop_loss_pct"] = float(stop_loss)
-            cfg["strategy"]["stop_loss_market"] = bool(stop_loss_market)
-            cfg["execution"]["reprice_wait_seconds"] = int(reprice_wait)
-            cfg["execution"]["reprice_attempts"] = int(reprice_attempts)
-            cfg["execution"]["entry_fallback_market"] = bool(entry_fallback)
-            cfg["execution"]["exit_fallback_market"] = False
-            ui.save_cfg(cfg)
-            st.success("Configuração salva com sucesso.")
+            ramps_clean: list[dict[str, float]] = []
+            seen_steps: set[int] = set()
+            errors: list[str] = []
+            editor_df = pd.DataFrame(ramps_editor).copy()
 
-    ramps = pd.DataFrame(cfg.get("strategy", {}).get("ramps", []) or [])
-    st.markdown("#### Ramps")
-    if ramps.empty:
-        st.info("Sem ramps configuradas.")
-    else:
-        st.dataframe(ramps, width="stretch", hide_index=True)
+            if editor_df.empty:
+                errors.append("Configure pelo menos uma rampa.")
+            else:
+                for _, row in editor_df.iterrows():
+                    try:
+                        step_index = int(row.get("step_index", 0))
+                        drop_pct = float(row.get("drop_pct", 0.0))
+                        multiplier = float(row.get("multiplier", 0.0))
+                    except Exception:
+                        errors.append("Há valores inválidos nas ramps.")
+                        break
+                    if step_index <= 0:
+                        errors.append("Cada rampa precisa de step_index > 0.")
+                    if step_index in seen_steps:
+                        errors.append("Não pode haver step_index duplicado.")
+                    seen_steps.add(step_index)
+                    if drop_pct <= 0:
+                        errors.append("Cada rampa precisa de drop_pct > 0.")
+                    if multiplier <= 0:
+                        errors.append("Cada rampa precisa de multiplier > 0.")
+                    ramps_clean.append(
+                        {
+                            "step_index": step_index,
+                            "drop_pct": round(drop_pct, 6),
+                            "multiplier": round(multiplier, 6),
+                        }
+                    )
+
+            ramps_clean.sort(key=lambda item: int(item["step_index"]))
+
+            if errors:
+                for message in errors:
+                    st.error(message)
+            else:
+                cfg["execution"]["mode"] = mode
+                cfg["execution"]["allow_live"] = bool(mode == "live")
+                cfg["market"]["symbol"] = symbol
+                cfg["market"]["timeframe"] = timeframe
+                cfg["portfolio"]["initial_cash_brl"] = float(initial_cash)
+                cfg["risk"]["max_open_brl"] = float(max_open)
+                cfg["risk"]["max_daily_loss_brl"] = float(max_daily_loss)
+                cfg["strategy"]["first_buy_brl"] = float(first_buy)
+                cfg["strategy"]["max_cycle_brl"] = float(max_cycle)
+                cfg["strategy"]["take_profit_pct"] = float(take_profit)
+                cfg["strategy"]["min_profit_brl"] = float(min_profit)
+                cfg["strategy"]["max_active_ramps"] = int(max_active_ramps)
+                cfg["strategy"]["trailing_enabled"] = bool(trailing_enabled)
+                cfg["strategy"]["trailing_activation_pct"] = float(trailing_activation)
+                cfg["strategy"]["trailing_callback_pct"] = float(trailing_callback)
+                cfg["strategy"]["stop_loss_pct"] = float(stop_loss)
+                cfg["strategy"]["stop_loss_market"] = bool(stop_loss_market)
+                cfg["strategy"]["ramps"] = ramps_clean
+                cfg["execution"]["reprice_wait_seconds"] = int(reprice_wait)
+                cfg["execution"]["reprice_attempts"] = int(reprice_attempts)
+                cfg["execution"]["entry_fallback_market"] = bool(entry_fallback)
+                cfg["execution"]["exit_fallback_market"] = False
+                ui.save_cfg(cfg)
+                st.success(
+                    "Configuração salva com sucesso. Reinicie o bot para aplicar as ramps e o limite de ramps ativas no runtime."
+                )
+
+    active_limit = ui.safe_int(cfg.get("strategy", {}).get("max_active_ramps", 0))
+    if active_limit > 0:
+        st.info(f"Ramps ativas por ciclo: {active_limit}. O bot vai usar no máximo esse número, respeitando também o teto financeiro do ciclo.")
+
+

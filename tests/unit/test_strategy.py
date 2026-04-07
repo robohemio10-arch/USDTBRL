@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from smartcrypto.domain.strategy import (
     can_execute_sell_reason,
     compute_exit_targets,
@@ -77,3 +78,17 @@ def test_normalize_ramps_generates_defaults() -> None:
 
     assert len(ramps) == 5
     assert ramps[0]["drop_pct"] > 0
+
+
+def test_profit_floor_blocks_underwater_take_profit_with_position_object() -> None:
+    cfg = sample_cfg()
+    position = SimpleNamespace(qty_usdt=100.0, brl_spent=500.0)
+
+    can_sell = can_execute_sell_reason(
+        position=position,
+        price_brl=4.99,
+        reason="take_profit",
+        cfg=cfg,
+    )
+
+    assert can_sell is False

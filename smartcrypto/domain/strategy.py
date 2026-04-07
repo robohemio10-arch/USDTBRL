@@ -78,6 +78,28 @@ def fit_ramps_to_cycle(
     return fitted, trimmed, cumulative
 
 
+
+def apply_active_ramp_limit(
+    ramps: list[dict[str, float]],
+    *,
+    max_active_ramps: int | None,
+    first_buy_brl: float,
+) -> tuple[list[dict[str, float]], int, float]:
+    if max_active_ramps is None or int(max_active_ramps) <= 0:
+        total_brl = float(first_buy_brl)
+        for row in ramps:
+            total_brl += float(first_buy_brl) * float(row["multiplier"])
+        return list(ramps), 0, total_brl
+
+    limited_count = max(0, int(max_active_ramps))
+    active = list(ramps[:limited_count])
+    trimmed = max(0, len(ramps) - len(active))
+    total_brl = float(first_buy_brl)
+    for row in active:
+        total_brl += float(first_buy_brl) * float(row["multiplier"])
+    return active, trimmed, total_brl
+
+
 def sanitize_exit_profile(
     *,
     tp_pct: float,
@@ -117,17 +139,45 @@ def sanitize_exit_profile(
 def strategy_runtime_diagnostics(params: dict[str, Any]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     configured_ramps = int(params.get("configured_ramps", len(params.get("ramps", []))))
-    trimmed_ramps = int(params.get("trimmed_ramps", 0))
-    if trimmed_ramps > 0:
+    active_ramps = len(params.get("ramps", []))
+    trimmed_ramps = int(params.get("trimmed_ramps", max(0, configured_ramps - active_ramps)))
+    cycle_trimmed_ramps = int(params.get("cycle_trimmed_ramps", 0))
+    dashboard_trimmed_ramps = int(params.get("dashboard_trimmed_ramps", 0))
+    if cycle_trimmed_ramps > 0:
         messages.append(
             {
                 "level": "WARN",
                 "code": "ramps_trimmed_to_cycle",
                 "payload": {
                     "configured_ramps": configured_ramps,
-                    "active_ramps": len(params.get("ramps", [])),
-                    "trimmed_ramps": trimmed_ramps,
+                    "active_ramps": active_ramps,
+                    "trimmed_ramps": cycle_trimmed_ramps,
                     "cycle_cap_brl": float(params.get("max_cycle_brl", 0.0)),
+                },
+            }
+        )
+    if dashboard_trimmed_ramps > 0:
+        messages.append(
+            {
+                "level": "INFO",
+                "code": "ramps_limited_by_dashboard",
+                "payload": {
+                    "configured_ramps": configured_ramps,
+                    "active_ramps": active_ramps,
+                    "trimmed_ramps": dashboard_trimmed_ramps,
+                    "max_active_ramps": int(params.get("max_active_ramps", 0)),
+                },
+            }
+        )
+    elif trimmed_ramps > 0 and cycle_trimmed_ramps == 0:
+        messages.append(
+            {
+                "level": "INFO",
+                "code": "ramps_trimmed",
+                "payload": {
+                    "configured_ramps": configured_ramps,
+                    "active_ramps": active_ramps,
+                    "trimmed_ramps": trimmed_ramps,
                 },
             }
         )
@@ -164,11 +214,22 @@ def strategy_params(cfg: dict[str, Any], regime: str) -> dict[str, Any]:
     )
     cycle_cap_brl = effective_cycle_cap(cfg, requested_cycle_brl)
     raw_ramps = normalize_ramps(cfg, regime, first_buy)
-    fitted_ramps, trimmed_ramps, fitted_total_brl = fit_ramps_to_cycle(
+    max_active_ramps_raw = strategy_cfg.get("max_active_ramps", 0)
+    try:
+        max_active_ramps = int(max_active_ramps_raw or 0)
+    except Exception:
+        max_active_ramps = 0
+    fitted_ramps, cycle_trimmed_ramps, cycle_total_brl = fit_ramps_to_cycle(
         raw_ramps,
         first_buy_brl=first_buy,
         cycle_cap_brl=cycle_cap_brl,
     )
+    active_ramps, dashboard_trimmed_ramps, fitted_total_brl = apply_active_ramp_limit(
+        fitted_ramps,
+        max_active_ramps=max_active_ramps,
+        first_buy_brl=first_buy,
+    )
+    trimmed_ramps = int(cycle_trimmed_ramps) + int(dashboard_trimmed_ramps)
 
     params: dict[str, Any] = {
         "enabled": bool(strategy_cfg.get("enabled", True)),
@@ -186,9 +247,13 @@ def strategy_params(cfg: dict[str, Any], regime: str) -> dict[str, Any]:
         "deactivate_after_sell": bool(cfg.get("runtime", {}).get("deactivate_after_sell", False)),
         "configured_ramps": len(raw_ramps),
         "trimmed_ramps": int(trimmed_ramps),
+        "cycle_trimmed_ramps": int(cycle_trimmed_ramps),
+        "dashboard_trimmed_ramps": int(dashboard_trimmed_ramps),
+        "max_active_ramps": int(max_active_ramps),
+        "cycle_fitted_total_brl": round(float(cycle_total_brl), 2),
         "fitted_cycle_total_brl": round(float(fitted_total_brl), 2),
     }
-    params["ramps"] = fitted_ramps
+    params["ramps"] = active_ramps
     params["safety_orders"] = len(params["ramps"])
     return params
 
@@ -218,19 +283,46 @@ def sell_reason_uses_profit_floor(reason: str) -> bool:
     return reason in {"take_profit", "trailing_exit"}
 
 
+def _resolve_sell_context(
+    *,
+    qty_usdt: float | None = None,
+    brl_spent: float | None = None,
+    position: Any | None = None,
+) -> tuple[float, float]:
+    if position is not None:
+        if qty_usdt is None:
+            qty_usdt = getattr(position, "qty_usdt", None)
+        if brl_spent is None:
+            brl_spent = getattr(position, "brl_spent", None)
+        if isinstance(position, dict):
+            if qty_usdt is None:
+                qty_usdt = position.get("qty_usdt")
+            if brl_spent is None:
+                brl_spent = position.get("brl_spent")
+    if qty_usdt is None or brl_spent is None:
+        raise ValueError("qty_usdt e brl_spent são obrigatórios para validar saída.")
+    return float(qty_usdt), float(brl_spent)
+
+
 def can_execute_sell_reason(
     *,
-    qty_usdt: float,
-    brl_spent: float,
     price_brl: float,
     reason: str,
     cfg: dict[str, Any],
+    qty_usdt: float | None = None,
+    brl_spent: float | None = None,
+    position: Any | None = None,
 ) -> bool:
+    resolved_qty_usdt, resolved_brl_spent = _resolve_sell_context(
+        qty_usdt=qty_usdt,
+        brl_spent=brl_spent,
+        position=position,
+    )
     if not sell_reason_uses_profit_floor(reason):
         return True
     pnl_brl = estimate_exit_pnl_brl(
-        qty_usdt=float(qty_usdt),
-        brl_spent=float(brl_spent),
+        qty_usdt=resolved_qty_usdt,
+        brl_spent=resolved_brl_spent,
         price_brl=float(price_brl),
         fee_rate=float(cfg["execution"].get("fee_rate", 0.001)),
     )

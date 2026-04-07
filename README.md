@@ -7,11 +7,11 @@ Bot profissional de compra e venda USDT/BRL na Binance, com arquitetura modular,
 ## Perfis operacionais
 
 - Paper padrão: `config/config.yml`
-- Paper 7d: `config/paper_7d.yml`
-- Live: `config/live.yml`
+- Paper 7d: `config/config.yml`
+- Live: `config/live_100usdt.yml`
 
 `config/config.yml` agora é **paper-only** e usa banco paper dedicado.  
-`config/live.yml` é o perfil explícito para operação live.
+`config/live_100usdt.yml` é o perfil explícito para operação live.
 
 ---
 
@@ -46,7 +46,7 @@ python bot.py --config config/config.yml
 ### 5. Rodar o bot em live
 
 ```bash
-python bot.py --config config/live.yml
+python bot.py --config config/live_100usdt.yml
 ```
 
 ### 6. Rodar o dashboard em paper
@@ -58,7 +58,7 @@ streamlit run dashboard.py -- --config config/config.yml
 ### 7. Rodar o dashboard em live
 
 ```bash
-streamlit run dashboard.py -- --config config/live.yml
+streamlit run dashboard.py -- --config config/live_100usdt.yml
 ```
 
 ---
@@ -66,7 +66,7 @@ streamlit run dashboard.py -- --config config/live.yml
 ## Regras operacionais
 
 - Não usar banco live com perfil paper.
-- Não usar `config.live.yml` em código novo. Ele permanece apenas por compatibilidade.
+- Não usar `config/live_100usdt.yml` em código novo. Ele permanece apenas por compatibilidade.
 - Preflight agora falha se a identidade operacional do banco divergir do perfil carregado.
 - Reconcile live agora é fail-closed para divergência material de posição.
 
@@ -84,5 +84,6 @@ streamlit run dashboard.py -- --config config/live.yml
 ## Shadow Mode
 
 ```bash
-python scripts/run_shadow_mode.py --config config/paper_7d.yml --force
+python scripts/run_shadow_mode.py --config config/config.yml --force
 ```
+

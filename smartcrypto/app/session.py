@@ -13,7 +13,7 @@ PAGE_OPTIONS = [
     "IA & Rollout",
 ]
 
-AUTO_REFRESH_PAGES = {"Resumo", "Mercado", "Proteção", "DB"}
+AUTO_REFRESH_PAGES = {"Resumo", "Mercado", "Operações", "Proteção", "DB"}
 
 
 def ensure_session_defaults() -> None:

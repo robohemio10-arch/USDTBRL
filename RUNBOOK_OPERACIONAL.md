@@ -3,8 +3,8 @@
 ## Perfis suportados
 
 - Paper padrão: `config/config.yml`
-- Paper 7d: `config/paper_7d.yml`
-- Live: `config/live.yml`
+- Paper 7d: `config/config.yml`
+- Live: `config/live_100usdt.yml`
 
 ## Comandos
 
@@ -15,7 +15,7 @@ python scripts/migrate_db.py --config config/config.yml
 
 ### Migrar banco live
 ```bash
-python scripts/migrate_db.py --config config/live.yml
+python scripts/migrate_db.py --config config/live_100usdt.yml
 ```
 
 ### Healthcheck paper
@@ -25,7 +25,7 @@ python scripts/healthcheck.py --config config/config.yml --strict
 
 ### Healthcheck live
 ```bash
-python scripts/healthcheck.py --config config/live.yml --strict
+python scripts/healthcheck.py --config config/live_100usdt.yml --strict
 ```
 
 ### Executar paper
@@ -35,7 +35,7 @@ python bot.py --config config/config.yml
 
 ### Executar live
 ```bash
-python bot.py --config config/live.yml
+python bot.py --config config/live_100usdt.yml
 ```
 
 ## Guard-rails
@@ -44,3 +44,4 @@ python bot.py --config config/live.yml
 - Reconcile live pausa o runtime em divergência material.
 - Recovery de dispatch lock reaplica estado econômico do fill.
 - Trades agora carregam identidade operacional (`bot_order_id`, `client_order_id`, `exchange_order_id`, `run_id`, `source`).
+

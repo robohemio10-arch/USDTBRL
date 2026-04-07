@@ -2,8 +2,8 @@
 
 ## Subida
 
-- [ ] `config/paper_7d.yml` selecionado
-- [ ] `config/feature_flags_paper_7d.yaml` selecionado
+- [ ] `config/config.yml` selecionado
+- [ ] `config/feature_flags.yaml` selecionado
 - [ ] `runtime.experiment_profile=paper_7d`
 - [ ] `runtime.protocol_version=paper-v1`
 - [ ] `runtime.profile_frozen=true`
@@ -29,3 +29,4 @@
 - [ ] `circuit_breaker_paused`
 - [ ] `reconcile_mismatch`
 - [ ] `unexpected_shutdown`
+
