@@ -54,3 +54,9 @@ data/logs/
 data/runtime/
 data/dashboard_cache/
 *.bak
+
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/logs/*.jsonl
+data/dashboard_cache/*
+watchdog_ntfy_fix.patch
