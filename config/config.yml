@@ -45,7 +45,7 @@ execution:
   allow_live: false
 risk:
   max_open_brl: 90000.0
-  max_daily_loss_brl: 50.0
+  max_daily_loss_brl: 5000  
 strategy:
   enabled: true
   first_buy_brl: 100.0
