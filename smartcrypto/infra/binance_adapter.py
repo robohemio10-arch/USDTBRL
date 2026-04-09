@@ -142,26 +142,89 @@ class ExchangeAdapter:
         payload = self._public_request("GET", "/api/v3/ticker/price", {"symbol": self.symbol})
         return float(payload["price"])
 
+
     def fetch_ohlcv(self, timeframe: str, limit: int) -> pd.DataFrame:
-        payload = self._public_request(
-            "GET",
-            "/api/v3/klines",
-            {"symbol": self.symbol, "interval": timeframe, "limit": int(limit)},
+        interval_ms_map = {
+            "1s": 1_000,
+            "1m": 60_000,
+            "3m": 3 * 60_000,
+            "5m": 5 * 60_000,
+            "15m": 15 * 60_000,
+            "30m": 30 * 60_000,
+            "1h": 60 * 60_000,
+            "2h": 2 * 60 * 60_000,
+            "4h": 4 * 60 * 60_000,
+            "6h": 6 * 60 * 60_000,
+            "8h": 8 * 60 * 60_000,
+            "12h": 12 * 60 * 60_000,
+            "1d": 24 * 60 * 60_000,
+            "3d": 3 * 24 * 60 * 60_000,
+            "1w": 7 * 24 * 60 * 60_000,
+            "1M": 30 * 24 * 60 * 60_000,
+        }
+
+        if timeframe not in interval_ms_map:
+            raise ValueError(f"timeframe não suportado para histórico paginado: {timeframe}")
+
+        remaining = int(limit)
+        interval_ms = interval_ms_map[timeframe]
+        end_time: int | None = None
+        rows: list[dict[str, Any]] = []
+
+        while remaining > 0:
+            batch_size = min(remaining, 1000)
+            params: dict[str, Any] = {
+                "symbol": self.symbol,
+                "interval": timeframe,
+                "limit": batch_size,
+            }
+
+            if end_time is not None:
+                params["endTime"] = end_time
+
+            payload = self._public_request("GET", "/api/v3/klines", params)
+
+            if not payload:
+                break
+
+            batch_rows: list[dict[str, Any]] = []
+            for row in payload:
+                batch_rows.append(
+                    {
+                        "open_time": pd.to_datetime(int(row[0]), unit="ms", utc=True),
+                        "open": float(row[1]),
+                        "high": float(row[2]),
+                        "low": float(row[3]),
+                        "close": float(row[4]),
+                        "volume": float(row[5]),
+                        "close_time": pd.to_datetime(int(row[6]), unit="ms", utc=True),
+                    }
+                )
+
+            rows = batch_rows + rows
+            remaining -= len(batch_rows)
+
+            first_open_time_ms = int(payload[0][0])
+            end_time = first_open_time_ms - interval_ms
+
+            if len(batch_rows) < batch_size:
+                break
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return frame
+
+        frame = (
+            frame
+            .drop_duplicates(subset=["open_time"])
+            .sort_values("open_time")
+            .reset_index(drop=True)
         )
-        rows = []
-        for row in payload:
-            rows.append(
-                {
-                    "open_time": pd.to_datetime(int(row[0]), unit="ms", utc=True),
-                    "open": float(row[1]),
-                    "high": float(row[2]),
-                    "low": float(row[3]),
-                    "close": float(row[4]),
-                    "volume": float(row[5]),
-                    "close_time": pd.to_datetime(int(row[6]), unit="ms", utc=True),
-                }
-            )
-        return pd.DataFrame(rows)
+
+        if len(frame) > limit:
+            frame = frame.iloc[-limit:].reset_index(drop=True)
+
+        return frame
 
     @staticmethod
     def _to_decimal(value: float | str) -> Decimal:

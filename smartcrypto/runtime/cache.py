@@ -87,10 +87,24 @@ def write_market_cache(cfg: dict[str, Any], interval: str, df: pd.DataFrame) -> 
         out = df.copy()
         if out.empty:
             return
-        if "ts" in out.columns:
-            out["ts"] = pd.to_datetime(out["ts"], errors="coerce", utc=True).dt.strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
+
+        for col in out.columns:
+            try:
+                if pd.api.types.is_datetime64_any_dtype(out[col]) or pd.api.types.is_datetime64tz_dtype(out[col]):
+                    out[col] = pd.to_datetime(out[col], errors="coerce", utc=True).dt.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
+            except Exception:
+                pass
+
+        for col in ("ts", "open_time", "close_time"):
+            if col in out.columns:
+                out[col] = pd.to_datetime(out[col], errors="coerce", utc=True).dt.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+
+        out = out.where(pd.notnull(out), None)
+
         payload = {
             "saved_at": utc_now(),
             "symbol": str(cfg.get("market", {}).get("symbol", "")),
