@@ -63,7 +63,7 @@ def test_normalized_execution_mode_maps_dry_run_to_paper() -> None:
 
 def test_dashboard_warnings_detect_live_and_preflight_issue(monkeypatch) -> None:
     module = _load_dashboard_module()
-    monkeypatch.setattr(module, "config_path", lambda: types.SimpleNamespace(name="live.yml"))
+    monkeypatch.setattr(module, "config_path", lambda: types.SimpleNamespace(name="live_100usdt.yml"))
     monkeypatch.setattr(
         module,
         "dashboard_db_identity",

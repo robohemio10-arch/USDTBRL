@@ -49,6 +49,25 @@ class RuntimeServices:
     config_path: str
 
 
+
+class StartupReconcileFailedError(RuntimeError):
+    pass
+
+
+def startup_reconcile_fail_closed(cfg: dict[str, Any]) -> bool:
+    runtime = dict(cfg.get("runtime", {}) or {})
+    return bool(runtime.get("startup_reconcile_fail_closed", True))
+
+
+def _startup_reconcile_should_raise(cfg: dict[str, Any]) -> bool:
+    mode = str(cfg.get("execution", {}).get("mode", "") or "").strip().lower()
+    return mode == "live" and startup_reconcile_fail_closed(cfg)
+
+
+def _startup_reconcile_failure_message(exc: Exception) -> str:
+    return str(exc) or exc.__class__.__name__
+
+
 def resolve_config_path(path: str | Path | None = None) -> Path:
     return resolve_runtime_config_path(path or DEFAULT_CONFIG_PATH)
 
@@ -256,6 +275,7 @@ def bootstrap_runtime_services(config_path: str | Path | None = None) -> Runtime
     )
 
 
+
 def run_startup_reconcile(
     context: RuntimeContext,
     logger: Any,
@@ -269,18 +289,45 @@ def run_startup_reconcile(
     exchange = context.exchange
     try:
         recover_dispatch_locks_fn(cfg, store, exchange)
-        record_runtime_event(cfg, context.database, event="recovery_event", level="INFO", details={"build_id": build_id})
-        reconcile_live_exchange_state_fn(cfg, store, exchange, last_price=exchange.get_last_price())
-        store.add_event("INFO", "live_startup_reconciled", {"build_id": build_id})
-        record_runtime_event(cfg, context.database, event="startup_reconcile_ok", level="INFO", details={"build_id": build_id})
-        logger.info("live_startup_reconciled", build_id=build_id)
-    except Exception as exc:
-        store.add_event("ERROR", "live_startup_reconcile_failed", {"error": str(exc)})
         record_runtime_event(
             cfg,
             context.database,
-            event="reconcile_mismatch",
-            level="ERROR",
-            details={"error": str(exc), "build_id": build_id},
+            event="recovery_event",
+            level="INFO",
+            details={"build_id": build_id},
         )
-        logger.error("live_startup_reconcile_failed", error=str(exc))
+        reconcile_result = reconcile_live_exchange_state_fn(
+            cfg,
+            store,
+            exchange,
+            last_price=exchange.get_last_price(),
+        )
+        if bool(getattr(reconcile_result, "needs_action", False)):
+            reason = str(getattr(reconcile_result, "reason", "") or "startup_reconcile_requires_action")
+            raise StartupReconcileFailedError(reason)
+        store.add_event("INFO", "live_startup_reconciled", {"build_id": build_id})
+        record_runtime_event(
+            cfg,
+            context.database,
+            event="startup_reconcile_ok",
+            level="INFO",
+            details={"build_id": build_id},
+        )
+        logger.info("live_startup_reconciled", build_id=build_id)
+    except Exception as exc:
+        error_message = _startup_reconcile_failure_message(exc)
+        store.set_flag("live_reconcile_required", True)
+        store.set_flag("paused", True)
+        store.add_event("ERROR", "live_startup_reconcile_failed", {"error": error_message})
+        record_runtime_event(
+            cfg,
+            context.database,
+            event="startup_reconcile_failed",
+            level="ERROR",
+            details={"error": error_message, "build_id": build_id},
+        )
+        logger.error("live_startup_reconcile_failed", error=error_message)
+        if _startup_reconcile_should_raise(cfg):
+            if isinstance(exc, StartupReconcileFailedError):
+                raise
+            raise StartupReconcileFailedError(error_message) from exc

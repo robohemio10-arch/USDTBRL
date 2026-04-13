@@ -66,3 +66,7 @@ data/*.sqlite-shm
 data/logs/*.jsonl
 data/dashboard_cache/*
 watchdog_ntfy_fix.patch
+
+data/research/usdtbrl_1m_3y.csv
+data/research/split_csv/usdtbrl_1m_2024.csv
+data/research/split_csv/usdtbrl_1m_2025.csv

@@ -64,9 +64,12 @@ from smartcrypto.common.env import (
 )
 from smartcrypto.infra.notifications import NtfyClient
 from smartcrypto.runtime.cache import (
+    cache_scope_token,
     cache_symbol_token,
     dashboard_cache_dir,
     market_cache_file,
+    normalized_execution_mode as cache_execution_mode,
+    open_orders_cache_file as runtime_open_orders_cache_file,
     runtime_status_cache_file,
 )
 from smartcrypto.runtime.status import runtime_status_summary
@@ -138,7 +141,7 @@ def dashboard_warnings(cfg: dict[str, Any], operational_status: dict[str, Any] |
 
     if mode == "live":
         warnings.append("Dashboard carregado com perfil LIVE. Use-o apenas para observação e diagnóstico.")
-    if config_name in {"live_100usdt.yml", "live.yml", "config.live.yml"}:
+    if config_name in {"live_100usdt.yml"}:
         warnings.append("O dashboard está usando um arquivo de configuração live.")
     if str(preflight.get("status", "")).lower() not in {"", "ok"}:
         warnings.append(f"Pré-flight reporta {str(preflight.get('status', 'unknown')).upper()}.")
@@ -180,6 +183,8 @@ def write_market_cache_df(cfg: dict[str, Any], interval: str, df: pd.DataFrame) 
         payload = {
             "saved_at": pd.Timestamp.utcnow().isoformat(),
             "symbol": str(cfg.get("market", {}).get("symbol", "")),
+            "execution_mode": cache_execution_mode(cfg),
+            "cache_scope": cache_scope_token(cfg),
             "interval": interval,
             "rows": [],
         }
@@ -194,6 +199,8 @@ def write_market_cache_df(cfg: dict[str, Any], interval: str, df: pd.DataFrame) 
         payload = {
             "saved_at": pd.Timestamp.utcnow().isoformat(),
             "symbol": str(cfg.get("market", {}).get("symbol", "")),
+            "execution_mode": cache_execution_mode(cfg),
+            "cache_scope": cache_scope_token(cfg),
             "interval": interval,
             "rows": out[
                 [c for c in ["ts", "open", "high", "low", "close", "volume"] if c in out.columns]
@@ -280,10 +287,7 @@ def ensure_market_cache_interval(
 
 
 def open_orders_cache_file(cfg: dict[str, Any]) -> Path:
-    return (
-        dashboard_cache_dir(cfg)
-        / f"open_orders_{cache_symbol_token(cfg.get('market', {}).get('symbol', 'USDTBRL'))}.json"
-    )
+    return runtime_open_orders_cache_file(cfg)
 
 
 @st.cache_data(ttl=5, show_spinner=False)

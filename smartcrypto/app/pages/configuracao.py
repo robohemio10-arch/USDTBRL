@@ -14,7 +14,7 @@ def _normalized_mode(cfg: dict[str, Any]) -> str:
 def _config_is_live_profile(ui: Any) -> bool:
     try:
         path = Path(str(ui.config_path()))
-        return path.name.lower() in {"live_100usdt.yml", "live.yml", "config.live.yml"}
+        return path.name.lower() in {"live_100usdt.yml"}
     except Exception:
         return False
 

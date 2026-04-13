@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "loop_seconds": 5,
         "deactivate_after_sell": False,
         "startup_reconcile": True,
+        "startup_reconcile_fail_closed": True,
         "reconcile_on_tick": True,
         "inflight_order_lock_seconds": 120,
         "circuit_breaker_max_errors": 5,

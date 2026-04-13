@@ -9,7 +9,11 @@ from urllib.parse import quote
 import pandas as pd
 
 from smartcrypto.app.config_io import root_dir
-from smartcrypto.runtime.cache import dashboard_cache_dir, open_orders_cache_file as _unused  # noqa: F401
+from smartcrypto.runtime.cache import (
+    cache_payload_matches_cfg,
+    dashboard_cache_dir,
+    open_orders_cache_file,
+)
 from smartcrypto.state.portfolio import Portfolio
 from smartcrypto.state.position_manager import PositionManager
 from smartcrypto.state.store import StateStore
@@ -148,7 +152,7 @@ def read_table(cfg: dict[str, Any], table: str, limit: int = 200) -> pd.DataFram
 def load_runtime_status(cfg: dict[str, Any], runtime_status_cache_file: Any) -> dict[str, Any]:
     payload = read_json_file(runtime_status_cache_file(cfg))
     status_obj = payload.get("status", {}) if isinstance(payload, dict) else {}
-    if isinstance(status_obj, dict) and status_obj:
+    if cache_payload_matches_cfg(cfg, payload) and isinstance(status_obj, dict) and status_obj:
         return cast(dict[str, Any], status_obj)
     store = state_store(cfg)
     runtime_portfolio = portfolio(cfg).runtime_view(
@@ -186,13 +190,10 @@ def load_runtime_status(cfg: dict[str, Any], runtime_status_cache_file: Any) -> 
     }
 
 
-def open_orders_cache_file(cfg: dict[str, Any]) -> Path:
-    symbol = str(cfg.get("market", {}).get("symbol", "USDTBRL")).replace("/", "")
-    return dashboard_cache_dir(cfg) / f"open_orders_{symbol}.json"
-
-
 def load_open_orders_cache(cfg: dict[str, Any]) -> pd.DataFrame:
     payload = read_json_file(open_orders_cache_file(cfg))
+    if not cache_payload_matches_cfg(cfg, payload):
+        return pd.DataFrame()
     rows = payload.get("orders", []) if isinstance(payload, dict) else []
     df = pd.DataFrame(rows)
     if df.empty:

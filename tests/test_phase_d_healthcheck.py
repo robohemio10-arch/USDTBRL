@@ -8,6 +8,7 @@ from pathlib import Path
 from smartcrypto.common.health import health_report
 from smartcrypto.config import normalize_config
 from smartcrypto.runtime.bot_runtime import write_runtime_status_cache
+from smartcrypto.runtime.cache import market_cache_file
 from smartcrypto.state.store import StateStore
 
 
@@ -51,11 +52,38 @@ class PhaseDHealthTests(unittest.TestCase):
         write_runtime_status_cache(self.cfg, {"price_brl": 5.2, "equity_brl": 10000.0})
         cache_dir = Path(self.cfg["dashboard"]["cache_dir"])
         cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / "market_USDTBRL_15m.json").write_text(
-            json.dumps({"rows": []}), encoding="utf-8"
+        market_cache_file(self.cfg, "15m").write_text(
+            json.dumps(
+                {
+                    "interval": "15m",
+                    "rows": [],
+                    "execution_mode": "paper",
+                    "cache_scope": "paper",
+                }
+            ),
+            encoding="utf-8",
         )
         report = health_report(self.cfg, self.store, interval="15m")
         self.assertEqual(report["status"], "ok")
+
+
+    def test_health_report_ignores_mismatched_runtime_cache_payload(self):
+        runtime_cache = Path(self.cfg["dashboard"]["cache_dir"]) / "runtime_status_paper_USDTBRL.json"
+        runtime_cache.parent.mkdir(parents=True, exist_ok=True)
+        runtime_cache.write_text(
+            json.dumps(
+                {
+                    "saved_at": "2026-03-24T12:00:00Z",
+                    "execution_mode": "live",
+                    "cache_scope": "live",
+                    "status": {"price_brl": 5.2},
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = health_report(self.cfg, self.store, interval="15m")
+        codes = {item["code"] for item in report["issues"]}
+        self.assertIn("no_runtime_cache", codes)
 
 
 if __name__ == "__main__":

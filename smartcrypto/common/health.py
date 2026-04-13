@@ -7,7 +7,12 @@ from typing import Any, cast
 import pandas as pd
 
 from smartcrypto.common.logging_utils import read_recent_logs
-from smartcrypto.runtime.cache import market_cache_file, runtime_status_cache_file
+from smartcrypto.runtime.cache import (
+    market_cache_file,
+    read_market_cache_payload,
+    read_runtime_status_payload,
+    runtime_status_cache_file,
+)
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -41,6 +46,19 @@ def _age_seconds(value: Any) -> float | None:
 
 
 
+
+
+def _cache_age_seconds(payload: dict[str, Any], fallback_path: Path) -> float | None:
+    if not payload:
+        return None
+    payload_saved_at = payload.get("saved_at") if isinstance(payload, dict) else None
+    saved_at_age = _age_seconds(payload_saved_at)
+    if saved_at_age is not None:
+        return saved_at_age
+    if fallback_path.exists():
+        return _age_seconds(fallback_path.stat().st_mtime)
+    return None
+
 def health_report(cfg: dict[str, Any], store, *, interval: str | None = None) -> dict[str, Any]:
     status = "ok"
     issues: list[dict[str, Any]] = []
@@ -55,12 +73,12 @@ def health_report(cfg: dict[str, Any], store, *, interval: str | None = None) ->
     snapshot_age = _age_seconds(last_snapshot_at)
 
     runtime_cache = runtime_status_cache_file(cfg)
-    runtime_cache_age = _age_seconds(
-        runtime_cache.stat().st_mtime if runtime_cache.exists() else None
-    )
+    runtime_cache_payload = read_runtime_status_payload(cfg)
+    runtime_cache_age = _cache_age_seconds(runtime_cache_payload, runtime_cache)
 
     market_cache = market_cache_file(cfg, interval=interval)
-    market_cache_age = _age_seconds(market_cache.stat().st_mtime if market_cache.exists() else None)
+    market_cache_payload = read_market_cache_payload(cfg, interval or "")
+    market_cache_age = _cache_age_seconds(market_cache_payload, market_cache)
 
     stale_runtime_minutes = int(cfg.get("health", {}).get("stale_runtime_minutes", 20) or 20)
     stale_market_cache_minutes = int(
